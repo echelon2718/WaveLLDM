@@ -162,3 +162,4 @@ class CrossAttention(nn.Module):
         out = rearrange(out, 'b n h d -> b n (h d)')
         out = self.to_out(out)
         return out
+
