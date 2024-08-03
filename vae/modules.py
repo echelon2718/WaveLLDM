@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import numpy as np
+import torch.nn.functional as F
 from einops import rearrange
 
 def get_timestep_embedding(timesteps, embedding_dim):
@@ -18,7 +19,7 @@ def get_timestep_embedding(timesteps, embedding_dim):
         emb = torch.nn.functional.pad(emb, (0, 1, 0, 0))
 
     return emb
-    
+
 def Normalize(in_channels, num_groups=32):
     return nn.GroupNorm(
         num_channels=in_channels, num_groups=num_groups, eps=1e-6, affine=True
@@ -296,7 +297,7 @@ class Decoder(nn.Module):
 
         block_in = intermediate_channels * channel_multipliers[self.num_resolutions - 1]
         current_resolution = resolution // (2 ** (self.num_resolutions - 1))
-        self.z_shape = (1, z_channels, current_resolution, current_resolution) # Ini keknya perlu diperbaiki, ukurannya seharusnya (1, z_channels, current_resolution(dimensi mel), downsampled_timestep (gonna do something about this))
+        self.z_shape = (1, z_channels, current_resolution, current_resolution*2) # Ini keknya perlu diperbaiki, ukurannya seharusnya (1, z_channels, current_resolution(dimensi mel), downsampled_timestep (gonna do something about this))
         print("Melakukan operasi pada z dengan dimensi {} = {} dimensi.".format(
               self.z_shape, np.prod(self.z_shape)))
 
