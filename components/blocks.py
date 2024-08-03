@@ -38,7 +38,7 @@ class Conv1D(nn.Module):
             if activation == 'lrelu':
                 self.activation = nn.LeakyReLU()
             elif activation == 'silu':
-                self.activation = SiLU()
+                self.activation = nn.SiLU()
             elif activation == 'relu':
                 self.activation = nn.ReLU()
             elif activation == 'flrelu':
@@ -89,7 +89,7 @@ class ConvTranspose1D(nn.Module):
             if activation == 'lrelu':
                 self.activation = nn.LeakyReLU()
             elif activation == 'silu':
-                self.activation = SiLU()
+                self.activation = nn.SiLU()
             elif activation == 'relu':
                 self.activation = nn.ReLU()
             else:
