@@ -1,18 +1,16 @@
 # This file contains the generator model for the HifiGAN model.
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils.parametrizations import weight_norm, spectral_norm
 from torch.nn.utils import remove_weight_norm
 import math
 
-from model.components.blocks import LRELU_SLOPE, get_padding, init_weights, Conv1D, ConvTranspose1D, FusedLeakyReLU, ResidualBlock1, ResidualBlock2
+from model.components.blocks import LRELU_SLOPE, init_weights, Conv1D, ConvTranspose1D, FusedLeakyReLU, ResidualBlock1, ResidualBlock2
 
 class Generator(nn.Module):
     def __init__(self, h):
-        super(Generator, self).__init__():
-        self.h
+        super(Generator, self).__init__()
+        self.h = h
         self.num_kernels = len(h.resblock_kernel_sizes)
         self.num_upsamples = len(h.upsample_rates)
         self.conv_pre = Conv1D(in_channels=80, out_channels=h.upsample_initial_channel, kernel_size=7, stride=1, padding=3, dilation=1, activation=None)
@@ -40,7 +38,7 @@ class Generator(nn.Module):
             x = FusedLeakyReLU(LRELU_SLOPE)(x)
             x = self.ups[i](x)
             xs = None
-            for j in range(self.num_kernels)
+            for j in range(self.num_kernels):
                 if xs is None:
                     xs = self.resblocks[i * self.num_kernels + j](x)
                 else:
@@ -59,38 +57,3 @@ class Generator(nn.Module):
         for resblock in self.resblocks:
             resblock.remove_weight_norm()
         remove_weight_norm(self.conv_post.conv)
-
-class DiscriminatorP(nn.Module):
-    def __init__(self, period, kernel_size=5, use_spectral_norm=False):
-        super(DiscriminatorP, self).__init__()
-        self.period = period
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
-        self.convs = nn.ModuleList([
-            norm_f(Conv2d(1, 32, (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
-            norm_f(Conv2d(32, 128, (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
-            norm_f(Conv2d(128, 512, (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
-            norm_f(Conv2d(512, 1024, (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
-            norm_f(Conv2d(1024, 1024, (kernel_size, 1), 1, padding=(2, 0))),
-        ])
-        self.conv_post = norm_f(Conv2d(1024, 1, (3, 1), 1, padding=(1, 0)))
-    
-    def forward(self, x):
-        fmap = []
-
-        # 1d to 2d
-        b, c, t = x.shape
-        if t % self.period != 0: # pad first
-            n_pad = self.period - (t % self.period)
-            x = F.pad(x, (0, n_pad), "reflect")
-            t = t + n_pad
-        x = x.view(b, c, t // self.period, self.period)
-
-        for l in self.convs:
-            x = l(x)
-            x = F.leaky_relu(x, LRELU_SLOPE)
-            fmap.append(x)
-        x = self.conv_post(x)
-        fmap.append(x)
-        x = torch.flatten(x, 1, -1)
-
-        return x, fmap
