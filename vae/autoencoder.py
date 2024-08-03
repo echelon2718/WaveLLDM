@@ -3,45 +3,37 @@ import torch.nn as nn
 from model.vae.modules import Encoder, Decoder
 from model.vae.distributions import DiagonalGaussianDistribution
 
-from model.components.generator import get_vocoder, vocoder_infer
 
 class AutoencoderKL(nn.Module):
     def __init__(
             self,
-            ddconfig = None,
-            lossconfig = None,
-            image_key = "fbank",
-            embed_dim = None,
+            enc_config,
+            dec_config,
             time_shuffle = 1,
             subband = 1,
-            ckpt_path = None,
-            reload_from_ckpt = None,
-            ignore_keys = [],
-            colorize_nlabels = None,
+            embed_dim = 256,
             monitor = None,
-            base_lr = 1e-5
     ):
         super(AutoencoderKL, self).__init__()
         
-        self.encoder = Encoder(**ddconfig)
-        self.decoder = Decoder(**ddconfig)
+        self.encoder = Encoder(**enc_config)
+        self.decoder = Decoder(**dec_config)
 
         self.subband = int(subband)
 
         if self.subband > 1:
             print("Use subband decomposition %s" % self.subband)
         
-        self.quant_conv = nn.Conv2d(2 * ddconfig["z_channels"], 2 * embed_dim, 1)
-        self.post_quant_conv = nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
+        self.quant_conv = nn.Conv2d(2 * enc_config["z_channels"], 2 * embed_dim, 1)
+        self.post_quant_conv = nn.Conv2d(embed_dim, enc_config["z_channels"], 1)
 
-        self.vocoder = get_vocoder(None, "cpu") # Perlu diperhatikan
-        self.embed_dim = embed_dim
+        # self.vocoder = get_vocoder(None, "cpu") # Perlu diperhatikan
+        # self.embed_dim = embed_dim
 
         if monitor is not None:
             self.monitor = monitor
         
         self.time_shuffle = time_shuffle
-        self.reload_from_ckpt = reload_from_ckpt
         self.reloaded = False
         self.mean, self.std = None, None
     
@@ -57,11 +49,6 @@ class AutoencoderKL(nn.Module):
         x = self.decoder(z)
         x = self.freq_merge_subband(x)
         return x
-
-    def decode_to_waveform(self, dec):
-        dec = dec.squeeze(1).permute(2, 0, 1)
-        wav_recon = vocoder_infer(dec, self.vocoder)
-        return wav_recon
     
     def forward(self, input, sample_posterior=True):
         posterior = self.encode(input)
@@ -69,10 +56,6 @@ class AutoencoderKL(nn.Module):
             z = posterior.sample()
         else:
             z = posterior.mode()
-        
-        if self.flag_first_run:
-            print("latent shape: ", z.shape)
-            self.flag_first_run = False
         
         x = self.decode(z)
 
