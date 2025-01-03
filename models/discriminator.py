@@ -45,7 +45,7 @@ class MultiperiodDisc(nn.Module):
 
         for l in self.conv:
             x = l(x)
-            x = F.leaky_relu(x, 0.1)
+            x = F.leaky_relu(x, 0.1, inplace=False)
             fmap.append(x)
         x = self.post_conv(x)
         fmap.append(x)
@@ -87,7 +87,7 @@ class MultiscaleDisc(nn.Module):
 
         for l in self.conv:
             x = l(x)
-            x = F.leaky_relu(x, 0.1)
+            x = F.leaky_relu(x, 0.1, inplace=False)
             fmap.append(x)
         x = self.post_conv(x)
         fmap.append(x)
