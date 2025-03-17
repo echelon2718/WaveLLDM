@@ -120,7 +120,7 @@ class DiffusionUNet(nn.Module):
         self.time_mlp = SinusoidalTimeEmbedding(model_channels)
         
         # Initial projection
-        self.init_conv = ConvolutionalNet(in_channels, model_channels, kernel_size=3)
+        self.init_conv = ConvolutionalNet(in_channels, model_channels, kernel_size=1)
         
         # Down blocks - increasing channel dimensions
         ch = model_channels
@@ -155,7 +155,7 @@ class DiffusionUNet(nn.Module):
             
         # Final blocks
         self.final_res = ResBlock1(ch*2, dilation=(1,1))
-        self.final_conv = ConvolutionalNet(ch*2, out_channels, kernel_size=3)
+        self.final_conv = ConvolutionalNet(ch*2, out_channels, kernel_size=1)
         
         # Initialize weights
         self.apply(self._init_weights)
