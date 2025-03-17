@@ -1,6 +1,6 @@
 
 # WaveLLDM: Desain dan Pengembangan Model Difusi Laten Ringan dalam Peningkatan Kualitas dan Restorasi Suara Ucapan
-Kevin Putra Santoso, dkk. (2025)
+Kevin Putra Santoso (2025)
 
 Wave Lightweight Latent Diffusion Models (WaveLLDM) adalah model difusi laten berbasis deep learning yang dirancang untuk melakukan proses denoising audio pada perangkat tepi. WaveLLDM bertujuan meningkatkan kualitas dan restorasi suara ucapan dengan efisiensi komputasi yang lebih baik dibandingkan model difusi konvensional.
 
