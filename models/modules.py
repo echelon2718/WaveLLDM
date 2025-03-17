@@ -215,7 +215,7 @@ class RotaryAttention(nn.Module):
         n_heads: int = 8,
         n_kv_heads: int = 4,
         max_seq_len: int = 2048,
-        device: str = "cuda"
+        device: str = "cuda" if torch.cuda.is_available() else "cpu"
     ):
         super().__init__()
         self.dim = dim
