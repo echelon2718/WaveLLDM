@@ -90,6 +90,15 @@ class DownsampleFSQ(nn.Module):
         result.z = self.upsample(result.z)
 
         # Pad or crop z to match original shape
+        # diff = original_shape[-1] - result.z.shape[-1]
+        # left = diff // 2
+        # right = diff - left
+
+        # if diff > 0:
+        #     result.z = F.pad(result.z, (left, right))
+        # elif diff < 0:
+        #     result.z = result.z[..., -left:right]
+
         diff = original_shape[-1] - result.z.shape[-1]
         left = max(diff // 2, 0)  # Pastikan left tidak negatif
         right = max(diff - left, 0)
