@@ -162,6 +162,7 @@ class LogMelSpectrogram(nn.Module):
         center=False,
         f_min=0.0,
         f_max=None,
+        convert_to_fp_16=False,
     ):
         super().__init__()
 
@@ -173,6 +174,7 @@ class LogMelSpectrogram(nn.Module):
         self.n_mels = n_mels
         self.f_min = f_min
         self.f_max = f_max or float(sample_rate // 2)
+        self.convert_to_fp_16 = convert_to_fp_16
 
         self.spectrogram = LinearSpectrogram(n_fft, win_length, hop_length, center)
 
@@ -210,6 +212,10 @@ class LogMelSpectrogram(nn.Module):
         x = self.apply_mel_scale(linear)
         x = self.compress(x)
 
+        if self.convert_to_fp_16:
+            x = x.to(torch.float16)
+            linear = linear.to(torch.float16)
+        
         if return_linear:
             return x, self.compress(linear)
 
