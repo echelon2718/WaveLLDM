@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import numpy as np
 from typing import List
 
+from models.utils import LogMelSpectrogram
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 def feature_loss(fmap_r: List[torch.Tensor], fmap_g: List[torch.Tensor]):
@@ -28,7 +30,7 @@ def discriminator_loss(
         dg = dg.float()
         r_loss = torch.mean((1 - dr) ** 2)
         g_loss = torch.mean(dg**2)
-        loss += r_loss + g_loss
+        loss = loss + r_loss + g_loss
         r_losses.append(r_loss.item())
         g_losses.append(g_loss.item())
 
@@ -62,70 +64,113 @@ def melspec_loss(aud_x, aud_y, spec_transform):
     loss = nn.L1Loss()(spec_x, spec_y)
     return loss
 
-class AdversarialLoss(nn.Module):
-    def __init__(self, device=device):
-        super(AdversarialLoss, self).__init__()
-        self.device = device
-        self.loss = nn.BCELoss()
+class MultiScaleSpecLoss(nn.Module):
+    def __init__(
+        self,
+        n_mels_list : list = [5, 10, 20, 40, 80, 160, 320],
+        n_ffts : list = [32, 64, 128, 256, 512, 1024, 2048],
+        win_lengths : list = [32, 64, 128, 256, 512, 1024, 2048]
+    ):
+        super(MultiScaleSpecLoss, self).__init__()
+        self.n_mels_list = n_mels_list
+        self.n_ffts = n_ffts
+        self.win_lengths = win_lengths
+        self.hop_lengths = [w // 4 for w in win_lengths]
 
-    def forward(self, X, gen, disc):
-        X = X.to(self.device)
-        recon_X, posterior = gen(X)
-        preds = disc(recon_X)
-        loss = self.loss(preds, torch.ones_like(preds))
-        return loss, recon_X, posterior
+        self.spec_transforms = []
 
-class FeatureMatchingLoss(nn.Module):
-    def __init__(self, disc,device=device):
-        super(FeatureMatchingLoss, self).__init__()
-        self.criterion = nn.MSELoss()
-        self.disc = disc.to(device)
+        for n_mels, n_fft, win_length, hop_length in zip(self.n_mels_list, self.n_ffts, self.win_lengths, self.hop_lengths):
+            spec_transform = LogMelSpectrogram(
+                sample_rate=44100,
+                n_fft=n_fft,
+                win_length=win_length,
+                hop_length=hop_length,
+                n_mels=n_mels,
+                convert_to_fp_16=False
+            )
+            self.spec_transforms.append(spec_transform.to(device))      
 
-    def forward(self, real_data, fake_data):
-        loss = 0
-        with torch.no_grad():
-            _, real_features = self.disc(real_data, return_features=True)
-            _, fake_features = self.disc(fake_data, return_features=True)
+        self.criterion = nn.L1Loss()
+
+    def forward(self, aud_x, aud_y, device):
+        aud_x, aud_y = aud_x.to(device), aud_y.to(device)
         
-        for real, fake in zip(real_features, fake_features):
-            loss += self.criterion(fake, real.detach())
+        # Sesuaikan panjang sinyal secara temporal
+        if aud_x.shape[-1] > aud_y.shape[-1]:
+            aud_y = F.pad(aud_y, (0, aud_x.shape[-1] - aud_y.shape[-1]))
+        elif aud_x.shape[-1] < aud_y.shape[-1]:
+            aud_x = F.pad(aud_x, (0, aud_y.shape[-1] - aud_x.shape[-1]))
+        
+        total_loss = 0.0
+    
+        # Iterasi untuk tiap transformasi (skala)
+        for spec_transform in self.spec_transforms:
+            # Hitung mel spectrogram untuk kedua sinyal
+            spec_x = spec_transform(aud_x)
+            spec_y = spec_transform(aud_y)
             
+            # Tambahkan loss L1 dari masing-masing skala
+            total_loss += self.criterion(spec_x, spec_y)
+        
+        return total_loss
+
+class MultiScaleSTFTLoss(nn.Module):
+    def __init__(
+        self,
+        n_ffts : list = [32, 64, 128, 256, 512, 1024, 2048],
+        win_lengths : list = [32, 64, 128, 256, 512, 1024, 2048]
+    ):
+        super(MultiScaleSTFTLoss, self).__init__()
+
+        self.n_ffts = n_ffts
+        self.win_lengths = win_lengths
+        self.hop_lengths = [w // 4 for w in win_lengths]
+
+        self.criterion = nn.L1Loss()
+
+    def stft(self, audio, n_fft, win_length, hop_length, device):
+        """Menghitung STFT dari sinyal audio"""
+        window = torch.hann_window(win_length).to(device)
+        spec = torch.stft(
+            audio,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            window=window,
+            center=True,
+            pad_mode="reflect",
+            normalized=False,
+            onesided=True,
+            return_complex=True,
+        )
+        return spec
+
+    def forward(self, aud_x, aud_y, device):
+        """
+        Menghitung Multi-Scale STFT Loss antara sinyal target (aud_y) dan sinyal hasil rekonstruksi (aud_x).
+        """
+
+        # Pastikan kedua sinyal memiliki panjang yang sama
+        if aud_x.shape[-1] > aud_y.shape[-1]:
+            aud_y = F.pad(aud_y, (0, aud_x.shape[-1] - aud_y.shape[-1]))
+        elif aud_x.shape[-1] < aud_y.shape[-1]:
+            aud_x = F.pad(aud_x, (0, aud_y.shape[-1] - aud_x.shape[-1]))
+
+        aud_x = aud_x.squeeze(1)  # [batch, T]
+        aud_y = aud_y.squeeze(1)  # [batch, T]
+        
+        loss = 0.0
+
+        # Hitung STFT loss untuk berbagai skala
+        for n_fft, win_length, hop_length in zip(self.n_ffts, self.win_lengths, self.hop_lengths):
+            spec_x = self.stft(aud_x, n_fft, win_length, hop_length, device)
+            spec_y = self.stft(aud_y, n_fft, win_length, hop_length, device)
+
+            # Pisahkan magnitudo dan fase
+            mag_x = torch.abs(spec_x)
+            mag_y = torch.abs(spec_y)
+
+            # L1 Loss pada spektrum magnitude
+            loss += self.criterion(mag_x, mag_y)
+
         return loss
-
-class GeneratorLoss(nn.Module):
-    def __init__(self,
-                 fm_disc,
-                 lambda_adv=1, 
-                 lambda_fm=2, 
-                 lambda_spec=45, 
-        ):
-        super(GeneratorLoss, self).__init__()
-        self.lambda_adv = lambda_adv
-        self.lambda_recon = lambda_recon
-        self.lambda_fm = lambda_fm
-        self.lambda_kl = lambda_kl
-
-    def forward(self, X, gen, disc):
-        adv_loss, recon_X, posterior = self.adversarial_loss(X, gen, disc)
-        recon_loss = self.recon_loss(X, recon_X)
-        fm_loss = self.feature_matching(X, recon_X)
-        kl_loss = posterior.KL()
-
-        loss = self.lambda_adv * adv_loss + self.lambda_recon * recon_loss + self.lambda_fm * fm_loss + self.lambda_kl * kl_loss
-        return loss
-
-class DiscriminatorLoss(nn.Module):
-    def __init__(self, device=device):
-        super(DiscriminatorLoss, self).__init__()
-        self.device = device
-        self.loss = nn.BCELoss()
-
-    def forward(self, real_Y, fake_Y, disc):
-        real_Y, fake_Y = real_Y.to(self.device), fake_Y.to(self.device)
-        preds_real = disc(real_Y)
-        loss_real = self.loss(preds_real, torch.ones_like(preds_real))  # Target is 1 for real
-
-        preds_fake = disc(fake_Y)
-        loss_fake = self.loss(preds_fake, torch.zeros_like(preds_fake))  # Target is 0 for fake
-
-        return loss_real + loss_fake
