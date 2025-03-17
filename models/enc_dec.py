@@ -147,16 +147,6 @@ class HiFiGANGenerator(nn.Module):
         for i in range(self.num_upsamples):
             x = F.silu(x, inplace=True)
             x = self.ups[i](x)
-
-            # if self.training and self.checkpointing:
-            #     x = checkpoint(
-            #         self.resblocks[i],
-            #         x,
-            #         use_reentrant=False,
-            #     )
-            # else:
-            #     x = self.resblocks[i](x)
-
             x = self.resblocks[i](x)
 
         x = self.activation_post(x)
@@ -191,7 +181,8 @@ class FireflyArchitecture(nn.Module):
 
     def forward(self, x: torch.Tensor, template=None, mask=None) -> torch.Tensor:
         if self.spec_transform is not None:
-            x = self.spec_transform(x)
+            with torch.no_grad():
+                x = self.spec_transform(x)
 
         x = self.backbone(x)
         if mask is not None:
