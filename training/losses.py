@@ -170,7 +170,78 @@ class MultiScaleSTFTLoss(nn.Module):
             mag_x = torch.abs(spec_x)
             mag_y = torch.abs(spec_y)
 
+            # Standarisasi dengan skala log
+            log_mag_x = torch.log(mag_x + 1e-5)
+            log_mag_y = torch.log(mag_y + 1e-5)
+
             # L1 Loss pada spektrum magnitude
-            loss += self.criterion(mag_x, mag_y)
+            loss += self.criterion(log_mag_x, log_mag_y)
 
         return loss
+
+class EnhancedMultiScaleSTFTLoss(nn.Module):
+    def __init__(
+        self,
+        n_ffts: list = [512, 1024, 2048, 4096],  # Larger FFTs for high freqs
+        win_lengths: list = [512, 1024, 2048, 4096],
+        hop_ratio: float = 0.25,  # hop_length = win_length * hop_ratio
+        epsilon: float = 1e-5,
+    ):
+        super().__init__()
+        self.n_ffts = n_ffts
+        self.win_lengths = win_lengths
+        self.hop_lengths = [int(w * hop_ratio) for w in win_lengths]
+        self.epsilon = epsilon
+
+    def stft(self, audio, n_fft, win_length, hop_length, device):
+        window = torch.hann_window(win_length).to(device)
+        return torch.stft(
+            audio, n_fft, hop_length, win_length, window,
+            center=True, return_complex=True
+        )
+
+    def forward(self, aud_x, aud_y, device):
+        aud_x = aud_x.squeeze(1)
+        aud_y = aud_y.squeeze(1)
+        
+        total_loss = 0.0
+        for n_fft, win_length, hop_length in zip(self.n_ffts, self.win_lengths, self.hop_lengths):
+            spec_x = self.stft(aud_x, n_fft, win_length, hop_length, device)
+            spec_y = self.stft(aud_y, n_fft, win_length, hop_length, device)
+
+            mag_x = torch.abs(spec_x)
+            mag_y = torch.abs(spec_y)
+            
+            # Log-Magnitude L1 Loss
+            log_mag_loss = F.l1_loss(
+                torch.log(mag_x + self.epsilon), 
+                torch.log(mag_y + self.epsilon)
+            )
+            
+            # Linear Magnitude L2 Loss
+            linear_mag_loss = F.mse_loss(mag_x, mag_y)
+            
+            # Phase Loss (Complex & Group Delay)
+            real_loss = F.l1_loss(spec_x.real, spec_y.real)
+            imag_loss = F.l1_loss(spec_x.imag, spec_y.imag)
+            phase_loss = real_loss + imag_loss
+            
+            # High-Frequency Weighting
+            freq_bins = mag_x.shape[-2]
+            hf_weight = torch.linspace(1.0, 3.0, freq_bins).to(device)
+            hf_loss = (F.l1_loss(mag_x, mag_y, reduction='none') * hf_weight[None, None, :, None]).mean()
+            
+            # Spectral Convergence
+            spectral_convergence = torch.norm(mag_y - mag_x, p="fro") / (torch.norm(mag_y, p="fro") + 1e-8)
+            
+            # Total for this scale
+            scale_loss = (
+                log_mag_loss + 
+                0.5 * linear_mag_loss + 
+                0.3 * phase_loss + 
+                0.2 * hf_loss + 
+                0.1 * spectral_convergence
+            )
+            total_loss += scale_loss
+
+        return total_loss / len(self.n_ffts)  # Average across scales
