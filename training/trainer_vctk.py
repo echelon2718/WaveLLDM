@@ -5,7 +5,7 @@ from torch.cuda.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import StepLR
 import os
 import gc
-from .losses import feature_loss, discriminator_loss, generator_loss, melspec_loss, MultiScaleSpecLoss, MultiScaleSTFTLoss
+from .losses import feature_loss, discriminator_loss, generator_loss, melspec_loss, MultiScaleSpecLoss, MultiScaleSTFTLoss, EnhancedMultiScaleSTFTLoss
 
 class Trainer:
     def __init__(
@@ -17,7 +17,7 @@ class Trainer:
         g_opt, 
         d_opt, 
         scheduler=None, 
-        lambda_spec=65,
+        lambda_spec=30,
         lambda_stft=20,
         lambda_fm=2,
         save_interval=10000,
@@ -29,7 +29,7 @@ class Trainer:
         self.model = model.to(device)
         self.disc = disc.to(device)
         self.multiscale_melspec_loss = MultiScaleSpecLoss()
-        self.multiscale_stft_loss = MultiScaleSTFTLoss()
+        self.multiscale_stft_loss = EnhancedMultiScaleSTFTLoss()
         self.g_opt = g_opt
         self.d_opt = d_opt
         self.scheduler = scheduler
@@ -64,6 +64,8 @@ class Trainer:
                     audio_arr = audio_arr.unsqueeze(0)
 
                 out, _ = self.model(audio_arr)
+                audio_arr = audio_arr[:, :, :out.shape[-1]]  # Ensure same shape as output
+                
                 # Menggunakan discriminator untuk menghitung loss generator pada validasi
                 _, y_d_gs, fmap_rs, fmap_gs = self.disc(audio_arr, out)
                 g_loss_value, _ = generator_loss(y_d_gs)
@@ -152,7 +154,7 @@ class Trainer:
                     self.writer.add_scalar('Mean Discriminator Loss', avg_disc_loss, self.global_step)
                     
                     if i % 100 == 0:
-                        self.writer.add_audio('Generated Audio', out[0].detach().cpu()[0].numpy(), self.global_step, sample_rate=48000)
+                        self.writer.add_audio('Generated Audio', out[0].detach().cpu()[0].numpy(), self.global_step, sample_rate=44100)
                     
                     if i % self.save_interval == 0:
                         self.save_model()
