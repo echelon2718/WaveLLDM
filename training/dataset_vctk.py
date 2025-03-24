@@ -50,7 +50,7 @@ class DenoiserDataset(Dataset):
     
     def __getitem__(self, idx):
         # Load audio clean
-        clean_audio, clean_sr = librosa.load(os.path.join(self.clean_dir, self.clean_files[idx]), sr=None)
+        clean_audio, clean_sr = librosa.load(os.path.join(self.clean_dir, self.clean_files[idx]), sr=44100)
         # Pilih sample rate acak untuk audio noisy agar bervariasi, lalu resample ke clean_sr
         noisy_sr = int(clean_sr / (np.random.randint(1, 3) + 1))
         noisy_audio, noisy_sr = librosa.load(os.path.join(self.noisy_dir, self.noisy_files[idx]), sr=noisy_sr)
