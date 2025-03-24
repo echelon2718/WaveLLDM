@@ -2,7 +2,7 @@ import argparse
 import os
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import random_split, DataLoader
 import torch.multiprocessing as mp
 from tqdm import tqdm
 
@@ -28,6 +28,7 @@ def parse_args():
     parser.add_argument("--cut_duration", type=float, default=0.35, help="Define cut duration for every random cut")
     parser.add_argument("--fixed_length", type=int, default=32678, help="Define number of samples taken if specified")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for training")
+    parser.add_argument("--train_split_ratio", type=float, default=0.9, help="Define train set split ratio used for training")
     parser.add_argument("--epochs", type=int, default=20, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=3e-5, help="Learning rate")
     parser.add_argument("--num_workers", type=int, default=8, help="Number of DataLoader workers")
@@ -39,7 +40,7 @@ def create_models(device):
     backbone = models.ConvNeXtEncoder(
         input_channels=160,
         depths=[3, 3, 9, 3],
-        dims=[128, 256, 288, 384],
+        dims=[128, 256, 384, 512],
         drop_path_rate=0.2,
         kernel_size=7
     ).to(device)
@@ -50,14 +51,14 @@ def create_models(device):
         upsample_kernel_sizes=[16, 16, 4, 4, 4],
         resblock_kernel_sizes=[3, 7, 11],
         resblock_dilation_sizes=[[1, 3, 5], [1, 3, 5], [1, 3, 5]],
-        num_mels=384,
-        upsample_initial_channel=384,
+        num_mels=512,
+        upsample_initial_channel=512,
         pre_conv_kernel_size=13,
         post_conv_kernel_size=13
     ).to(device)
 
     quantizer = models.DownsampleFSQ(
-        input_dim=384,
+        input_dim=512,
         n_groups=8,
         n_codebooks=8,
         levels=[8, 8, 8, 6, 5],
@@ -101,18 +102,29 @@ def train(args):
         args.cut_duration,
         args.fixed_length
     )
+
+    train_ratio = args.train_split_ratio
+    val_ratio = 1 - train_ratio
+
+    train_size = int(train_ratio * len(dataset))
+    val_size = len(dataset) - train_size
+
+    train_ds, val_ds = random_split(dataset, [train_size, val_size])
     
-    train_dataloader = DataLoader(dataset, batch_size=args.batch_size, num_workers=args.num_workers)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    
+    # train_dataloader = DataLoader(dataset, batch_size=args.batch_size, num_workers=args.num_workers)
 
     # Optimizers and scheduler
-    gen_opt = torch.optim.Adam(ffgan.parameters(), lr=args.lr, betas=(0.5, 0.999))
-    disc_opt = torch.optim.Adam(disc.parameters(), lr=args.lr, betas=(0.5, 0.999))
+    gen_opt = torch.optim.Adam(ffgan.parameters(), lr=args.lr, betas=(0.9, 0.999))
+    disc_opt = torch.optim.Adam(disc.parameters(), lr=args.lr, betas=(0.9, 0.999))
     scheduler = ExponentialLRDecay(gen_opt)
 
     # Trainer setup
     trainer = Trainer(
-        train_dataloader,
-        None,  # Validation dataloader (if any)
+        train_loader,
+        val_loader,  # Validation dataloader (if any)
         ffgan,
         disc,
         gen_opt,
