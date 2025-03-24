@@ -3,7 +3,7 @@ from math import cos, pi, floor, sin
 from torch.optim import lr_scheduler
 
 class ExponentialLRDecay(lr_scheduler._LRScheduler):
-    def __init__(self, optimizer, gamma=0.998, decay_steps=1000, last_epoch=-1):
+    def __init__(self, optimizer, gamma=0.998, decay_steps=2000, last_epoch=-1):
         self.gamma = gamma
         self.decay_steps = decay_steps
         super(ExponentialLRDecay, self).__init__(optimizer, last_epoch)
