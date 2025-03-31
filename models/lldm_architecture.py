@@ -1,1 +1,333 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from tqdm import tqdm
+from inspect import isfunction
 
+def extract_into_tensor(a, t, x_shape):
+    b, *_ = t.shape
+    out = a.gather(-1, t)
+    return out.reshape(b, *((1,) * (len(x_shape) - 1)))
+
+def noise_like(shape, device, repeat=False):
+    repeat_noise = lambda: torch.randn((1, *shape[1:]), device=device).repeat(shape[0], *((1,) * (len(shape) - 1)))
+    noise = lambda: torch.randn(shape, device=device)
+    return repeat_noise() if repeat else noise()
+
+def exists(x):
+    return x is not None
+
+def default(val, d):
+    if exists(val):
+        return val
+    return d() if isfunction(d) else d
+
+class EMA:
+    """Exponential Moving Average untuk model parameters"""
+    def __init__(self, model, decay=0.9999):
+        self.decay = decay
+        self.shadow = {}
+        self.original = {}
+        
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+                
+    def apply(self, model):
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.original[name] = param.data.clone()
+                param.data.copy_(self.shadow[name])
+    
+    def update(self, model):
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    self.shadow[name] = self.shadow[name] * self.decay + param.data * (1 - self.decay)
+
+class DDPM(nn.Module):
+    def __init__(
+        self,
+        p_estimator: nn.Module, # model unet sebagai estimator
+        num_timesteps: int = 1000, # jumlah timestep maksimum denoising
+        beta_scheduler: str = "linear", # scheduler beta untuk mengatur intensitas noise, opsi: linear, cosine, sqrt_linear, sqrt
+        loss_type: str = "l2", # loss function yang digunakan, l2 = MSE, l1 = MAE
+        p_ckpt: str = None, # checkpoint model unet jika ada, ekspektasi format adalah .pth
+        use_ema: bool = True, # menggunakan exponential moving average untuk mengatur parameter model selama training
+        log_every: int = 100, # frekuensi logging
+        clip_denoised=True, # apakah akan meng-clamp hasil denoising ke rentang [-1, 1]
+        ema_decay: float = 0.9999, # decay rate untuk EMA
+        linear_start: float = 1e-4, # nilai beta awal untuk scheduler linear
+        linear_end: float = 2e-2, # nilai beta akhir untuk scheduler linear
+        cosine_s: float = 0.008, # parameter untuk cosine scheduler (konteks beta scheduler, bukan learning rate)
+        given_betas: list = None, # jika diberikan, gunakan beta yang sudah ada
+        v_posterior: float = 0., # parameter untuk posterior variance, parametrisasi posterior variance (Nichol & Dhariwal, 2021)
+        l_simple_weight: float = 1., # bobot untuk loss sederhana
+        conditioning_key: str = "z_noisy", # kunci untuk data yang digunakan untuk conditioning (misalnya, "z_noisy" untuk denoising)
+        parameterization: str = "eps", # parametrisasi untuk noise (eps atau x0)
+        learn_logvar: bool = False,
+        logvar_init: float = 0.0,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu", # perangkat untuk model (CPU atau GPU)
+    ):
+        super().__init__()
+        assert parameterization in ["eps", "x0"], 'currently only supporting "eps" and "x0"'
+        self.parameterization = parameterization
+        self.clip_denoised = clip_denoised
+        self.device = device
+
+        self.p_estimator = p_estimator
+
+        # ================= parameter untuk difusi ================= #
+        self.num_timesteps = num_timesteps
+        self.beta_scheduler = beta_scheduler
+        self.betas = given_betas if given_betas is not None else self.beta_schedule(
+            beta_start=linear_start,
+            beta_end=linear_end,
+            n_timestep=num_timesteps,
+            cosine_s=cosine_s,
+        )
+        
+        self.alphas                         = 1.0 - self.betas
+        self.alphas_cumprod                 = np.cumprod(self.alphas, axis=0)
+        self.alphas_cumprod_prev            = np.append(1., self.alphas_cumprod[:-1])
+
+        # kalkulasi untuk menghitung q(x_t | x_{t-1}) dan lain-lain
+        self.sqrt_alphas_cumprod            = np.sqrt(self.alphas_cumprod)
+        self.sqrt_one_minus_alphas_cumprod  = np.sqrt(1. - self.alphas_cumprod)
+        self.log_one_minus_alphas_cumprod   = np.log(1. - self.alphas_cumprod)
+        self.sqrt_recip_alphas_cumprod      = np.sqrt(1. / self.alphas_cumprod)
+        self.sqrt_recipm1_alphas_cumprod    = np.sqrt(1. / self.alphas_cumprod - 1)
+
+        # kalkulasi untuk posterior q(x_{t-1} | x_t, x_0), dengan parameterisasi varians (Nichol & Dhariwal, 2021)
+        self.v_posterior                    = v_posterior
+        self.posterior_variance             = (1 - self.v_posterior) * self.betas * (1. - self.alphas_cumprod_prev) / (
+                                               1. - self.alphas_cumprod) + self.v_posterior * self.betas
+        self.posterior_log_variance_clipped = np.log(np.maximum(self.posterior_variance, 1e-20))
+        self.posterior_mean_coef1           = self.betas * np.sqrt(self.alphas_cumprod_prev) / (1. - self.alphas_cumprod)
+        self.posterior_mean_coef2           = (1. - self.alphas_cumprod_prev) * np.sqrt(self.alphas) / (1. - self.alphas_cumprod)
+
+
+        # KONVERSI KE TENSOR DAN PENGATURAN PERANGKAT (GPU/CPU)
+        self.betas                          = torch.tensor(self.betas, dtype=torch.float32).to(device)
+        self.alphas                         = torch.tensor(self.alphas, dtype=torch.float32).to(device)
+        self.alphas_cumprod                 = torch.tensor(self.alphas_cumprod, dtype=torch.float32).to(device)
+        self.alphas_cumprod_prev            = torch.tensor(self.alphas_cumprod_prev, dtype=torch.float32).to(device)
+        self.sqrt_alphas_cumprod            = torch.tensor(self.sqrt_alphas_cumprod, dtype=torch.float32).to(device)
+        self.sqrt_one_minus_alphas_cumprod  = torch.tensor(self.sqrt_one_minus_alphas_cumprod, dtype=torch.float32).to(device)
+        self.log_one_minus_alphas_cumprod   = torch.tensor(self.log_one_minus_alphas_cumprod, dtype=torch.float32).to(device)
+        self.sqrt_recip_alphas_cumprod      = torch.tensor(self.sqrt_recip_alphas_cumprod, dtype=torch.float32).to(device)
+        self.sqrt_recipm1_alphas_cumprod    = torch.tensor(self.sqrt_recipm1_alphas_cumprod, dtype=torch.float32).to(device)
+        self.posterior_variance             = torch.tensor(self.posterior_variance, dtype=torch.float32).to(device)
+        self.posterior_log_variance_clipped = torch.tensor(self.posterior_log_variance_clipped, dtype=torch.float32).to(device)
+        self.posterior_mean_coef1           = torch.tensor(self.posterior_mean_coef1, dtype=torch.float32).to(device)
+        self.posterior_mean_coef2           = torch.tensor(self.posterior_mean_coef2, dtype=torch.float32).to(device)
+
+        if self.parameterization == "eps":
+            lvlb_weights = self.betas ** 2 / (
+                        2 * self.posterior_variance * self.alphas * (1 - self.alphas_cumprod))
+        elif self.parameterization == "x0":
+            lvlb_weights = 0.5 * np.sqrt(self.alphas_cumprod) / (2. * 1 - self.alphas_cumprod)
+        else:
+            raise NotImplementedError("mu not supported")
+
+        lvlb_weights[0] = lvlb_weights[1]
+        self.lvlb_weights = lvlb_weights
+        assert not torch.isnan(self.lvlb_weights).all()
+
+        # ======================================================== #
+
+
+        self.loss = nn.MSELoss() if loss_type == "l2" else nn.L1Loss()
+        self.p_ckpt = p_ckpt
+        self.use_ema = use_ema
+        self.log_every = log_every
+        self.ema_decay = ema_decay
+        
+        
+        self.l_simple_weight = l_simple_weight
+        self.conditioning_key = conditioning_key
+        self.learn_logvar = learn_logvar
+        self.logvar = torch.full(fill_value=logvar_init, size=(self.num_timesteps,))
+        if self.learn_logvar:
+            self.logvar = nn.Parameter(self.logvar, requires_grad=True)
+    
+    def beta_schedule(self, beta_start: float, beta_end: float, n_timestep: int, cosine_s=8e-3):
+        if self.beta_scheduler == "linear":
+            betas = torch.linspace(beta_start ** 0.5, beta_end ** 0.5, n_timestep, dtype=torch.float64) ** 2
+            return betas.numpy()
+        
+        elif self.beta_scheduler == "cosine":
+            timesteps = (
+                torch.arange(n_timestep + 1, dtype=torch.float64) / n_timestep + cosine_s
+            )
+
+            alphas = timesteps / (1 + cosine_s) * np.pi / 2
+            alphas = torch.cos(alphas) ** 2
+            alphas = alphas / alphas[0]
+            betas = 1 - alphas[1:] / alphas[:-1]
+            betas = np.clip(betas, a_min=0, a_max=0.999)
+
+            return betas.numpy()
+        
+        elif self.beta_scheduler == "sqrt_linear":
+            betas = torch.linspace(beta_start, beta_end, n_timestep, dtype=torch.float64)
+            return betas.numpy()
+
+        elif self.beta_scheduler == "sqrt":
+            betas = torch.linspace(beta_start, beta_end, n_timestep, dtype=torch.float64) ** 0.5
+            return betas.numpy()
+
+        else:
+            raise ValueError(f"Unknown beta scheduler: {self.beta_scheduler}")
+    
+    def q_mean_variance(self, x_start, t):
+        """
+        Get the distribution q(x_t | x_0).
+        :param x_start: the [N x C x ...] tensor of noiseless inputs.
+        :param t: the number of diffusion steps (minus 1). Here, 0 means one step.
+        :return: A tuple (mean, variance, log_variance), all of x_start's shape.
+        """
+        mean = (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start)
+        variance = extract_into_tensor(1.0 - self.alphas_cumprod, t, x_start.shape)
+        log_variance = extract_into_tensor(self.log_one_minus_alphas_cumprod, t, x_start.shape)
+        return mean, variance, log_variance
+
+    def predict_start_from_noise(self, x_t, t, noise):
+        ''' 
+        Implement the formula: x₀ = (1 / sqrt(αₜ)) * (xₜ - ((1 - αₜ) / sqrt(1 - ᾱₜ)) * ϵ)
+        '''
+        return (
+            extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
+            extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
+        )
+    
+    def q_posterior(self, x_start, x_t, t):
+        ''''
+        'Implement the formula: q(xₜ₋₁ | xₜ, x₀) = N(μₜ₋₁, σ²ₜ₋₁)
+        '''
+        posterior_mean = (
+            extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_start +
+            extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
+        )
+        posterior_variance = extract_into_tensor(self.posterior_variance, t, x_t.shape)
+        posterior_log_variance_clipped = extract_into_tensor(self.posterior_log_variance_clipped, t, x_t.shape)
+        return posterior_mean, posterior_variance, posterior_log_variance_clipped
+    
+    def p_mean_variance(self, x, t, clip_denoised: bool):
+        model_out = self.p_estimator(x, t)
+        if self.parameterization == "eps":
+            x_recon = self.predict_start_from_noise(x, t=t, noise=model_out)
+
+        elif self.parameterization == "x0":
+            x_recon = model_out
+
+        if clip_denoised:
+            x_recon.clamp_(-1., 1.)
+
+        model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
+
+        return model_mean, posterior_variance, posterior_log_variance
+    
+    @torch.no_grad() # Todo list ===> Pahami ini
+    def p_sample(self, x, t, clip_denoised=True, repeat_noise=False):
+        b, *_, device = *x.shape, x.device
+        model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, clip_denoised=clip_denoised)
+        noise = noise_like(x.shape, device, repeat_noise)
+        # no noise when t == 0
+        nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
+        return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
+    
+    @torch.no_grad()
+    def p_sample_loop(self, shape, return_intermediates=False):
+        device = self.betas.device
+        b = shape[0]
+        img = torch.randn(shape, device=device)
+        intermediates = [img]
+        for i in tqdm(reversed(range(0, self.num_timesteps)), desc='Sampling t', total=self.num_timesteps):
+            img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long),
+                                clip_denoised=self.clip_denoised)
+            if i % self.log_every_t == 0 or i == self.num_timesteps - 1:
+                intermediates.append(img)
+        if return_intermediates:
+            return img, intermediates
+        return img
+    
+    @torch.no_grad()
+    def sample(self, batch_size=16, return_intermediates=False):
+        image_size = self.image_size
+        channels = self.channels
+        return self.p_sample_loop((batch_size, channels, image_size, image_size),
+                                  return_intermediates=return_intermediates)
+    
+    def q_sample(self, x_start, t, noise=None):
+        noise = default(noise, lambda: torch.randn_like(x_start))
+        return (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
+                extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
+    
+    def get_loss(self, pred, target, mean=True):
+        if self.loss_type == 'l1':
+            loss = (target - pred).abs()
+            if mean:
+                loss = loss.mean()
+        elif self.loss_type == 'l2':
+            if mean:
+                loss = torch.nn.functional.mse_loss(target, pred)
+            else:
+                loss = torch.nn.functional.mse_loss(target, pred, reduction='none')
+        else:
+            raise NotImplementedError("unknown loss type '{loss_type}'")
+
+        return loss
+    
+    def p_losses(self, x_start, t, noise=None):
+        noise = default(noise, lambda: torch.randn_like(x_start))
+        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+        model_out = self.model(x_noisy, t)
+
+        loss_dict = {}
+        if self.parameterization == "eps":
+            target = noise
+        elif self.parameterization == "x0":
+            target = x_start
+        else:
+            raise NotImplementedError(f"Paramterization {self.parameterization} not yet supported")
+
+        loss = self.get_loss(model_out, target, mean=False).mean(dim=[1, 2, 3])
+
+        log_prefix = 'train' if self.training else 'val'
+
+        loss_dict.update({f'{log_prefix}/loss_simple': loss.mean()})
+        loss_simple = loss.mean() * self.l_simple_weight
+
+        loss_vlb = (self.lvlb_weights[t] * loss).mean()
+        loss_dict.update({f'{log_prefix}/loss_vlb': loss_vlb})
+
+        loss = loss_simple + self.original_elbo_weight * loss_vlb
+
+        loss_dict.update({f'{log_prefix}/loss': loss})
+
+        return loss, loss_dict
+    
+    def forward(self, x, *args, **kwargs):
+        t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+        return self.p_losses(x, t, *args, **kwargs)
+    
+class WaveLLDM(DDPM):
+    def __init__(
+            self,
+            encoder: nn.Module, # model encoder untuk mengubah data ke latent space
+            decoder: nn.Module, # model decoder untuk mengubah data dari latent space ke data asli
+            quantizer, # model quantizer untuk mengubah data ke representasi diskrit
+            std_rescale_z: bool = True, # apakah akan melakukan rescaling pada latent space
+            z_dim: int = 512, # dimensi latent space
+            optimizer: str = "adamw", # optimizer yang digunakan, opsi: adamw, adam, sgd
+            lr: float = 1e-4, # learning rate untuk optimizer
+            *args, 
+            **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+        self.image_size = kwargs.get('image_size', 256)
+        self.channels = kwargs.get('channels', 3)
+        self.log_every_t = kwargs.get('log_every_t', 100) # log every t steps
+        self.original_elbo_weight = kwargs.get('original_elbo_weight', 1.0) # bobot untuk original elbo loss
