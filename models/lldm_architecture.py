@@ -5,9 +5,6 @@ import numpy as np
 from tqdm import tqdm
 from inspect import isfunction
 
-from tqdm import tqdm
-from inspect import isfunction
-
 def extract_into_tensor(a, t, x_shape):
     b, *_ = t.shape
     out = a.gather(-1, t)
@@ -25,6 +22,29 @@ def default(val, d):
     if exists(val):
         return val
     return d() if isfunction(d) else d
+
+class EMA:
+    """Exponential Moving Average untuk model parameters"""
+    def __init__(self, model, decay=0.9999):
+        self.decay = decay
+        self.shadow = {}
+        self.original = {}
+        
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+                
+    def apply(self, model):
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.original[name] = param.data.clone()
+                param.data.copy_(self.shadow[name])
+    
+    def update(self, model):
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    self.shadow[name] = self.shadow[name] * self.decay + param.data * (1 - self.decay)
 
 class DDPM(nn.Module):
     def __init__(
