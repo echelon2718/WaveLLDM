@@ -5,6 +5,9 @@ import numpy as np
 from tqdm import tqdm
 from inspect import isfunction
 
+from tqdm import tqdm
+from inspect import isfunction
+
 def extract_into_tensor(a, t, x_shape):
     b, *_ = t.shape
     out = a.gather(-1, t)
@@ -22,29 +25,6 @@ def default(val, d):
     if exists(val):
         return val
     return d() if isfunction(d) else d
-
-class EMA:
-    """Exponential Moving Average untuk model parameters"""
-    def __init__(self, model, decay=0.9999):
-        self.decay = decay
-        self.shadow = {}
-        self.original = {}
-        
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.clone()
-                
-    def apply(self, model):
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.original[name] = param.data.clone()
-                param.data.copy_(self.shadow[name])
-    
-    def update(self, model):
-        with torch.no_grad():
-            for name, param in model.named_parameters():
-                if param.requires_grad:
-                    self.shadow[name] = self.shadow[name] * self.decay + param.data * (1 - self.decay)
 
 class DDPM(nn.Module):
     def __init__(
@@ -64,6 +44,7 @@ class DDPM(nn.Module):
         given_betas: list = None, # jika diberikan, gunakan beta yang sudah ada
         v_posterior: float = 0., # parameter untuk posterior variance, parametrisasi posterior variance (Nichol & Dhariwal, 2021)
         l_simple_weight: float = 1., # bobot untuk loss sederhana
+        original_elbo_weight: float = 0.0001, # bobot untuk loss ELBO asli
         conditioning_key: str = "z_noisy", # kunci untuk data yang digunakan untuk conditioning (misalnya, "z_noisy" untuk denoising)
         parameterization: str = "eps", # parametrisasi untuk noise (eps atau x0)
         learn_logvar: bool = False,
@@ -74,6 +55,7 @@ class DDPM(nn.Module):
         assert parameterization in ["eps", "x0"], 'currently only supporting "eps" and "x0"'
         self.parameterization = parameterization
         self.clip_denoised = clip_denoised
+        self.loss_type = loss_type
         self.device = device
 
         self.p_estimator = p_estimator
@@ -123,6 +105,7 @@ class DDPM(nn.Module):
         self.posterior_mean_coef1           = torch.tensor(self.posterior_mean_coef1, dtype=torch.float32).to(device)
         self.posterior_mean_coef2           = torch.tensor(self.posterior_mean_coef2, dtype=torch.float32).to(device)
 
+        self.original_elbo_weight = original_elbo_weight
         if self.parameterization == "eps":
             lvlb_weights = self.betas ** 2 / (
                         2 * self.posterior_variance * self.alphas * (1 - self.alphas_cumprod))
@@ -282,8 +265,11 @@ class DDPM(nn.Module):
     
     def p_losses(self, x_start, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
+        print("Noise shape: ", noise.shape)
+        print("x_start shape: ", x_start.shape)
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
-        model_out = self.model(x_noisy, t)
+        model_out = self.p_estimator(x_noisy, t)
+        print("Model out shape: ", model_out.shape)
 
         loss_dict = {}
         if self.parameterization == "eps":
@@ -293,7 +279,7 @@ class DDPM(nn.Module):
         else:
             raise NotImplementedError(f"Paramterization {self.parameterization} not yet supported")
 
-        loss = self.get_loss(model_out, target, mean=False).mean(dim=[1, 2, 3])
+        loss = self.get_loss(model_out, target, mean=False).mean(dim=[1, 2])
 
         log_prefix = 'train' if self.training else 'val'
 
