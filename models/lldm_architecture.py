@@ -5,6 +5,8 @@ import numpy as np
 from tqdm import tqdm
 from inspect import isfunction
 
+from models.unet import create_diffusion_model
+
 def extract_into_tensor(a, t, x_shape):
     b, *_ = t.shape
     out = a.gather(-1, t)
@@ -39,6 +41,11 @@ class EMA:
             if param.requires_grad:
                 self.original[name] = param.data.clone()
                 param.data.copy_(self.shadow[name])
+
+    def restore(self, model):
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                param.data.copy_(self.original[name])
     
     def update(self, model):
         with torch.no_grad():
@@ -328,12 +335,147 @@ class WaveLLDM(DDPM):
             std_rescale_z: bool = True, # apakah akan melakukan rescaling pada latent space
             z_dim: int = 512, # dimensi latent space
             optimizer: str = "adamw", # optimizer yang digunakan, opsi: adamw, adam, sgd
+            ema_decay: float = 0.9999, # decay rate untuk EMA
             lr: float = 1e-4, # learning rate untuk optimizer
             *args, 
             **kwargs
     ):
         super().__init__(*args, **kwargs)
-        self.image_size = kwargs.get('image_size', 256)
-        self.channels = kwargs.get('channels', 3)
         self.log_every_t = kwargs.get('log_every_t', 100) # log every t steps
         self.original_elbo_weight = kwargs.get('original_elbo_weight', 1.0) # bobot untuk original elbo loss
+
+        self.std_rescale_z = std_rescale_z
+        self.z_dim = z_dim
+        self.encoder = encoder
+        self.decoder = decoder
+        self.ema = EMA(self.model, decay=ema_decay)
+        self.ema_model = create_diffusion_model(
+            in_channels=z_dim,
+            base_channels=32,
+            out_channels=z_dim
+        )
+        self.ema_model.load_state_dict(self.model.state_dict())
+        self.ema_model = self.ema_model.to(self.device)
+        self.quantizer = quantizer
+        self.optimizer = optimizer
+        self.lr = lr
+
+    @torch.no_grad()
+    def encode(self, x):
+        '''
+        Encode the input data to latent space.
+        :param x: input data
+        :return: encoded data in latent space
+        '''
+        z = self.encoder(x)
+
+        if self.use_latent:
+            z = self.quantizer(z).latents
+        else:
+            z = self.quantizer(z).z
+        
+        return z
+    
+    @torch.no_grad()
+    def decode(self, z):
+        '''
+        Decode the latent space data to original data.
+        :param z: latent space data
+        :return: decoded data
+        '''
+        
+        x_recon = self.decoder(z)
+        
+        return x_recon
+    
+    def p_mean_variance(self, x, t, y, clip_denoised: bool):
+        model_out = self.p_estimator(x, t, y)
+        if self.parameterization == "eps":
+            x_recon = self.predict_start_from_noise(x, t=t, noise=model_out)
+        elif self.parameterization == "x0":
+            x_recon = model_out
+        if clip_denoised:
+            x_recon.clamp_(-1., 1.)
+        return self.q_posterior(x_start=x_recon, x_t=x, t=t)
+
+    def p_losses(self, x_start, t, y, noise=None):
+        # Generate noise if not provided
+        noise = default(noise, lambda: torch.randn_like(x_start))
+        # Sample noisy latents from q(x_t | x_0)
+        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+        # Predict noise (or x0) conditioned on degraded latents y
+        model_out = self.p_estimator(x_noisy, t, y)
+        
+        loss_dict = {}
+        # Determine target based on parameterization
+        if self.parameterization == "eps":
+            target = noise
+        elif self.parameterization == "x0":
+            target = x_start
+        else:
+            raise NotImplementedError(f"Parameterization {self.parameterization} not supported")
+        
+        # Compute loss
+        loss = self.get_loss(model_out, target, mean=False).mean(dim=[1, 2])
+        log_prefix = 'train' if self.training else 'val'
+        
+        # Update loss dictionary
+        loss_dict.update({f'{log_prefix}/loss_simple': loss.mean()})
+        loss_simple = loss.mean() * self.l_simple_weight
+        loss_vlb = (self.lvlb_weights[t] * loss).mean()
+        loss_dict.update({f'{log_prefix}/loss_vlb': loss_vlb})
+        loss = loss_simple + self.original_elbo_weight * loss_vlb
+        loss_dict.update({f'{log_prefix}/loss': loss})
+        
+        return loss, loss_dict
+    
+    @torch.no_grad()
+    def sample_with_ema(self, degraded_audio, batch_size=1):
+        # Encode degraded audio to latent space
+        y = self.encode(degraded_audio)
+        shape = (batch_size, self.z_dim, *y.shape[2:])  # Match latent dimensions
+        
+        # Apply EMA parameters to p_estimator
+        self.ema.apply(self.p_estimator)
+        z_sample = self.p_sample_loop(shape, y)  # Note: p_sample_loop needs y
+        # Restore original parameters
+        for name, param in self.p_estimator.named_parameters():
+            if param.requires_grad:
+                param.data.copy_(self.ema.original[name])
+        
+        return self.decode(z_sample)
+
+    @torch.no_grad()
+    def p_sample(self, x, t, y, clip_denoised=True, repeat_noise=False):
+        b, *_, device = *x.shape, x.device
+        model_mean, _, model_log_variance = self.p_mean_variance(x, t, y, clip_denoised=clip_denoised)
+        noise = noise_like(x.shape, device, repeat_noise)
+        nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
+        return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
+
+    @torch.no_grad()
+    def p_sample_loop(self, shape, y, return_intermediates=False):
+        device = self.betas.device
+        b = shape[0]
+        img = torch.randn(shape, device=device)
+        intermediates = [img]
+        for i in tqdm(reversed(range(0, self.num_timesteps)), desc='Sampling t', total=self.num_timesteps):
+            img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long), y,
+                                clip_denoised=self.clip_denoised)
+            if i % self.log_every_t == 0 or i == self.num_timesteps - 1:
+                intermediates.append(img)
+        if return_intermediates:
+            return img, intermediates
+        return img
+
+    def train_step(self, batch):
+        # Encode clean and degraded audio to latent space
+        clean_latents = self.encode(batch["clean_audio_tensor"])
+        degraded_latents = self.encode(batch["noisy_audio_tensor"])
+        
+        # Sample timestep t
+        t = torch.randint(0, self.num_timesteps, (clean_latents.shape[0],), device=self.device).long()
+        
+        # Compute loss using p_losses, conditioned on degraded_latents
+        loss, loss_dict = self.p_losses(clean_latents, t, degraded_latents)
+        return loss, loss_dict
