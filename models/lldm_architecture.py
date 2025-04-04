@@ -332,11 +332,12 @@ class WaveLLDM(DDPM):
             encoder: nn.Module, # model encoder untuk mengubah data ke latent space
             decoder: nn.Module, # model decoder untuk mengubah data dari latent space ke data asli
             quantizer, # model quantizer untuk mengubah data ke representasi diskrit
-            std_rescale_z: bool = True, # apakah akan melakukan rescaling pada latent space
+            std_scale_factor: float, # apakah akan melakukan rescaling pada latent space
             z_dim: int = 512, # dimensi latent space
             optimizer: str = "adamw", # optimizer yang digunakan, opsi: adamw, adam, sgd
             ema_decay: float = 0.9999, # decay rate untuk EMA
             lr: float = 1e-4, # learning rate untuk optimizer
+            use_latent: bool = True, # apakah akan menggunakan latent space untuk training
             *args, 
             **kwargs
     ):
@@ -344,21 +345,22 @@ class WaveLLDM(DDPM):
         self.log_every_t = kwargs.get('log_every_t', 100) # log every t steps
         self.original_elbo_weight = kwargs.get('original_elbo_weight', 1.0) # bobot untuk original elbo loss
 
-        self.std_rescale_z = std_rescale_z
+        self.std_scale_factor = std_scale_factor
         self.z_dim = z_dim
         self.encoder = encoder
         self.decoder = decoder
-        self.ema = EMA(self.model, decay=ema_decay)
+        self.ema = EMA(self.p_estimator, decay=ema_decay)
         self.ema_model = create_diffusion_model(
-            in_channels=z_dim,
+            in_channels=z_dim*2,
             base_channels=32,
             out_channels=z_dim
         )
-        self.ema_model.load_state_dict(self.model.state_dict())
+        self.ema_model.load_state_dict(self.p_estimator.state_dict())
         self.ema_model = self.ema_model.to(self.device)
         self.quantizer = quantizer
         self.optimizer = optimizer
         self.lr = lr
+        self.use_latent = use_latent
 
     @torch.no_grad()
     def encode(self, x):
