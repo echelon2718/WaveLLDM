@@ -2,9 +2,14 @@ import os
 import librosa
 from torch.utils.data import Dataset, DataLoader
 from models.utils import LogMelSpectrogram, count_parameters, get_padding_sample
+
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 import random
 import numpy as np
+import math
 
 def random_cut(audio, max_cuts=5, cut_duration=0.1, sample_rate=16000):
     """
@@ -27,6 +32,43 @@ def random_cut(audio, max_cuts=5, cut_duration=0.1, sample_rate=16000):
         audio[:, start:start + cut_samples] = 0
     return audio
 
+def collate_fn_latents(batch):
+    # Extract and preprocess clean and noisy tensors from the batch
+    zq_down_clean = [item['zq_down_clean_audio'].squeeze(0).permute(1, 0) for item in batch]  # Shape: [seq_len, 512]
+    zq_down_noisy = [item['zq_down_noisy_audio'].squeeze(0).permute(1, 0) for item in batch]  # Shape: [seq_len, 512]
+
+    # Get the sequence lengths of all items in the batch
+    lengths = torch.tensor([t.shape[0] for t in zq_down_clean])
+
+    # Find the maximum sequence length in the batch
+    max_length = max(lengths)
+
+    # Round up to the nearest multiple of 16
+    padded_length = math.ceil(max_length / 16) * 16
+
+    # Manually pad each sequence to the padded_length
+    clean_padded = torch.stack([
+        torch.nn.functional.pad(t, (0, 0, 0, padded_length - t.shape[0]), "constant", 0)
+        for t in zq_down_clean
+    ])
+    noisy_padded = torch.stack([
+        torch.nn.functional.pad(t, (0, 0, 0, padded_length - t.shape[0]), "constant", 0)
+        for t in zq_down_noisy
+    ])
+
+    # Adjust dimensions to [batch_size, 512, padded_length]
+    clean_padded = clean_padded.permute(0, 2, 1)
+    noisy_padded = noisy_padded.permute(0, 2, 1)
+
+    # Return the padded tensors and additional metadata
+    return {
+        "clean_audio_downsampled_latents": clean_padded,
+        "noisy_audio_downsampled_latents": noisy_padded,
+        "lengths": lengths,
+        "clean_sr": torch.tensor([item["clean_sr"] for item in batch]),
+        "noisy_sr_default": torch.tensor([item["noisy_sr_default"] for item in batch])
+    }
+
 class DenoiserDataset(Dataset):
     def __init__(
         self, 
@@ -36,7 +78,11 @@ class DenoiserDataset(Dataset):
         stage: int = 1,
         max_cuts: int = 10,
         cut_duration: float = 0.35,
-        fixed_length: int = None  # Baru: panjang sampel tetap (dalam jumlah sample)
+        fixed_length: int = None,  # Baru: panjang sampel tetap (dalam jumlah sample)
+        spec_trans = None,
+        encoder: nn.Module = None,
+        quantizer = None,
+        device: str = "cpu"
     ):
         self.clean_files = sorted(os.listdir(clean_dir))
         self.noisy_files = sorted(os.listdir(noisy_dir))
@@ -47,6 +93,10 @@ class DenoiserDataset(Dataset):
         self.max_cuts = max_cuts
         self.cut_duration = cut_duration
         self.fixed_length = fixed_length
+        self.spec_trans = spec_trans.to(device)
+        self.encoder = encoder.to(device) if encoder is not None else None
+        self.quantizer = quantizer.to(device) if quantizer is not None else None
+        self.device = device
     
     def __getitem__(self, idx):
         # Load audio clean
@@ -79,9 +129,36 @@ class DenoiserDataset(Dataset):
                 clean_audio = torch.nn.functional.pad(clean_audio, (0, pad_amount))
                 noisy_audio = torch.nn.functional.pad(noisy_audio, (0, pad_amount))
 
+        if self.encoder is not None and self.quantizer is not None:
+            clean_audio_spec = self.spec_trans(clean_audio.to(self.device))
+            noisy_audio_spec = self.spec_trans(noisy_audio.to(self.device))
+
+            with torch.no_grad():
+                self.encoder.eval()
+                self.quantizer.eval()
+
+                # Encode audio ke latent space
+                clean_audio = self.encoder(clean_audio_spec)          
+                noisy_audio = self.encoder(noisy_audio_spec)
+
+                # Quantize latent audio
+                zq_down_clean_audio = self.quantizer(clean_audio).latents
+                zq_down_noisy_audio = self.quantizer(noisy_audio).latents
+
+            item = {
+                "zq_down_clean_audio": zq_down_clean_audio,
+                "zq_down_noisy_audio": zq_down_noisy_audio,
+                "clean_audio_tensor": clean_audio_spec,
+                "noisy_audio_tensor": noisy_audio_spec,
+                "clean_sr": clean_sr,
+                "noisy_sr_default": noisy_sr_new
+            }
+
+            return item
+
         item = {
-            "clean_audio_tensor": clean_audio,
-            "noisy_audio_tensor": noisy_audio,
+            "clean_audio_tensor": clean_audio.to(self.device) if self.spec_trans is None else self.spec_trans(clean_audio.to(self.device)),
+            "noisy_audio_tensor": noisy_audio.to(self.device) if self.spec_trans is None else self.spec_trans(noisy_audio.to(self.device)),
             "clean_sr": clean_sr,
             "noisy_sr_default": noisy_sr_new
         }
@@ -90,3 +167,37 @@ class DenoiserDataset(Dataset):
 
     def __len__(self):
         return len(self.clean_files)
+
+class LatentDataset(Dataset):
+    def __init__(self, latent_clean_dir, latent_noisy_dir):
+        self.latent_clean_dir = latent_clean_dir
+        self.latent_noisy_dir = latent_noisy_dir
+        self.latent_clean_files = sorted(os.listdir(latent_clean_dir))
+        self.latent_noisy_files = sorted(os.listdir(latent_noisy_dir))
+    
+        assert len(self.latent_clean_files) == len(self.latent_noisy_files), "Mismatch in number of files"
+    
+    def __len__(self):
+        return len(self.latent_clean_files)
+    
+    def __getitem__(self, idx):
+        clean_file = os.path.join(self.latent_clean_dir, self.latent_clean_files[idx])
+        noisy_file = os.path.join(self.latent_noisy_dir, self.latent_noisy_files[idx])
+        
+        z_clean = np.load(clean_file)
+        z_noisy = np.load(noisy_file)
+
+        z_clean = torch.tensor(z_clean, dtype=torch.float32)
+        z_noisy = torch.tensor(z_noisy, dtype=torch.float32)
+
+        if z_clean.shape[-1] % 16 != 0:
+            new_size = math.ceil(z_clean.shape[-1] / 16) * 16
+            pad_amount = new_size - z_clean.shape[-1]
+            z_clean = F.pad(z_clean, (0, pad_amount), mode='constant', value=0)
+            z_noisy = F.pad(z_noisy, (0, pad_amount), mode='constant', value=0)
+        
+        return {
+            "z_clean": z_clean,
+            "z_noisy": z_noisy,
+            "pad_amount": pad_amount if pad_amount else 0
+        }
