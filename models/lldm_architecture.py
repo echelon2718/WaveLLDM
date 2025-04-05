@@ -205,7 +205,7 @@ class DDPM(nn.Module):
 
     def predict_start_from_noise(self, x_t, t, noise):
         ''' 
-        Implement the formula: x₀ = (1 / sqrt(αₜ)) * (xₜ - ((1 - αₜ) / sqrt(1 - ᾱₜ)) * ϵ)
+        Implement the formula: x₀ = (1 / sqrt(αₜ)) * (xₜ - sqrt(1 - ᾱₜ) * ϵ)
         '''
         return (
             extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
@@ -470,14 +470,33 @@ class WaveLLDM(DDPM):
             return img, intermediates
         return img
 
-    def train_step(self, batch):
+    def forward(self, batch):
         # Encode clean and degraded audio to latent space
-        clean_latents = self.encode(batch["clean_audio_tensor"])
-        degraded_latents = self.encode(batch["noisy_audio_tensor"])
+        clean_latents = batch["clean_audio_downsampled_latents"]
+        degraded_latents = batch["noisy_audio_downsampled_latents"]
         
         # Sample timestep t
         t = torch.randint(0, self.num_timesteps, (clean_latents.shape[0],), device=self.device).long()
         
         # Compute loss using p_losses, conditioned on degraded_latents
         loss, loss_dict = self.p_losses(clean_latents, t, degraded_latents)
+        return loss, loss_dict
+    
+    def train_step(self, batch):
+        # Move batch to device
+        batch["clean_audio_downsampled_latents"] = batch["clean_audio_downsampled_latents"].to(self.device)
+        batch["noisy_audio_downsampled_latents"] = batch["noisy_audio_downsampled_latents"].to(self.device)
+        
+        self.optimizer.zero_grad()
+
+        # Compute loss and update model parameters
+        loss, loss_dict = self.forward(batch)
+        
+        loss.backward()
+        self.optimizer.step()
+        
+        # Update EMA parameters
+        if self.use_ema:
+            self.ema.update(self.p_estimator)
+        
         return loss, loss_dict
