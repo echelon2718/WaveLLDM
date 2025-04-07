@@ -112,7 +112,10 @@ class DiffusionUNet(nn.Module):
         num_levels=4
     ):
         super().__init__()
-        
+        self.in_channels = in_channels
+        self.model_channels = model_channels
+        self.out_channels = out_channels
+        self.num_levels = num_levels
         self.time_dim = time_dim if time_dim is not None else model_channels
         time_dim = self.time_dim
         
@@ -142,7 +145,7 @@ class DiffusionUNet(nn.Module):
             max_seq_len=1024
         )
         self.mid_block2 = ResBlock1(ch*8, dilation=(1,))
-        self.mid_upsample = TransConvNet(ch*8, ch*8, 4, stride=2)
+        # self.mid_upsample = TransConvNet(ch*8, ch*8, 4, stride=2)
         
         # Up blocks - decreasing channel dimensions
         self.up_blocks = nn.ModuleList()
@@ -166,11 +169,16 @@ class DiffusionUNet(nn.Module):
             if hasattr(m, 'bias') and m.bias is not None:
                 torch.nn.init.zeros_(m.bias)
                 
-    def forward(self, x, time):
+    def forward(self, x, time, cond=None):
         # Time embedding
         t = self.time_mlp(time)
         
         # Initial projection
+        if cond is not None:
+            assert x.shape[2] == cond.shape[2], "Conditioning tensor must have the same length (L) as input tensor with shape (B, C, L)."
+            x = torch.cat([x, cond], dim=1)
+            assert x.shape[1] == self.in_channels, "Input tensor must have the same number of channels (C) as in_channels."
+
         x = self.init_conv(x)
         
         # Store skip connections
