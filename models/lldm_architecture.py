@@ -2,10 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from tqdm import tqdm
+from tqdm.notebook import tqdm
 from inspect import isfunction
+from torch.optim import AdamW, Adam
+import os
 
 from models.unet import create_diffusion_model
+from training.scheduler import linear_warmup_cosine_decay
+from torch.optim.lr_scheduler import LambdaLR
 
 def extract_into_tensor(a, t, x_shape):
     b, *_ = t.shape
@@ -332,11 +336,12 @@ class WaveLLDM(DDPM):
             encoder: nn.Module, # model encoder untuk mengubah data ke latent space
             decoder: nn.Module, # model decoder untuk mengubah data dari latent space ke data asli
             quantizer, # model quantizer untuk mengubah data ke representasi diskrit
-            std_scale_factor: float, # apakah akan melakukan rescaling pada latent space
+            std_scale_factor: float = 0.5061, # apakah akan melakukan rescaling pada latent space
             z_dim: int = 512, # dimensi latent space
             optimizer: str = "adamw", # optimizer yang digunakan, opsi: adamw, adam, sgd
             ema_decay: float = 0.9999, # decay rate untuk EMA
             lr: float = 1e-4, # learning rate untuk optimizer
+            use_lr_scheduler: bool = False, # apakah akan menggunakan learning rate scheduler
             use_latent: bool = True, # apakah akan menggunakan latent space untuk training
             *args, 
             **kwargs
@@ -347,18 +352,30 @@ class WaveLLDM(DDPM):
 
         self.std_scale_factor = std_scale_factor
         self.z_dim = z_dim
-        self.encoder = encoder
-        self.decoder = decoder
+
+        self.encoder = encoder.to(self.device)
+        self.encoder.eval()
+
+        self.decoder = decoder.to(self.device)
+        self.decoder.eval()
+
         self.ema = EMA(self.p_estimator, decay=ema_decay)
-        self.ema_model = create_diffusion_model(
-            in_channels=z_dim*2,
-            base_channels=32,
-            out_channels=z_dim
-        )
-        self.ema_model.load_state_dict(self.p_estimator.state_dict())
-        self.ema_model = self.ema_model.to(self.device)
-        self.quantizer = quantizer
-        self.optimizer = optimizer
+
+        self.quantizer = quantizer.to(self.device)
+        self.quantizer.eval() 
+
+        if optimizer == "adamw":
+            self.optimizer = AdamW(self.parameters(), lr=lr)
+        elif optimizer == "adam":
+            self.optimizer = Adam(self.parameters(), lr=lr)
+        elif optimizer == "sgd":
+            self.optimizer = torch.optim.SGD(self.parameters(), lr=lr, momentum=0.9)
+        else:
+            raise ValueError(f"Unknown optimizer: {optimizer}")
+
+        if use_lr_scheduler:
+            self.scheduler = LambdaLR(self.optimizer, lr_lambda=linear_warmup_cosine_decay())
+
         self.lr = lr
         self.use_latent = use_latent
 
@@ -369,6 +386,7 @@ class WaveLLDM(DDPM):
         :param x: input data
         :return: encoded data in latent space
         '''
+        assert x.dim() == 3, "Input data must be 3D tensor (batch_size, channels, length)"
         z = self.encoder(x)
 
         if self.use_latent:
@@ -385,7 +403,7 @@ class WaveLLDM(DDPM):
         :param z: latent space data
         :return: decoded data
         '''
-        
+        assert z.dim() == 3, "Latent data must be 3D tensor (batch_size, channels, length)"
         x_recon = self.decoder(z)
         
         return x_recon
@@ -434,7 +452,11 @@ class WaveLLDM(DDPM):
     @torch.no_grad()
     def sample_with_ema(self, degraded_audio, batch_size=1):
         # Encode degraded audio to latent space
-        y = self.encode(degraded_audio)
+        if degraded_audio.shape[1] != 512:
+            y = self.encode(degraded_audio)
+        else:
+            y = degraded_audio
+        
         shape = (batch_size, self.z_dim, *y.shape[2:])  # Match latent dimensions
         
         # Apply EMA parameters to p_estimator
@@ -445,7 +467,7 @@ class WaveLLDM(DDPM):
             if param.requires_grad:
                 param.data.copy_(self.ema.original[name])
         
-        return self.decode(z_sample)
+        return z_sample
 
     @torch.no_grad()
     def p_sample(self, x, t, y, clip_denoised=True, repeat_noise=False):
@@ -474,6 +496,10 @@ class WaveLLDM(DDPM):
         # Encode clean and degraded audio to latent space
         clean_latents = batch["clean_audio_downsampled_latents"]
         degraded_latents = batch["noisy_audio_downsampled_latents"]
+
+        if self.std_scale_factor: # Rescale latents if std_scale_factor is provided (1/std_scale_factor * latents)
+            clean_latents = clean_latents * (1./self.std_scale_factor)
+            degraded_latents = degraded_latents * (1./self.std_scale_factor)
         
         # Sample timestep t
         t = torch.randint(0, self.num_timesteps, (clean_latents.shape[0],), device=self.device).long()
@@ -494,9 +520,122 @@ class WaveLLDM(DDPM):
         
         loss.backward()
         self.optimizer.step()
+
+        if self.use_lr_scheduler:
+            self.scheduler.step()
         
         # Update EMA parameters
         if self.use_ema:
             self.ema.update(self.p_estimator)
         
         return loss, loss_dict
+    
+    def validate(self, epoch, val_dataloader, writer):
+        self.p_estimator.eval()
+        val_loss = 0.0
+        val_steps = 0
+
+        with torch.no_grad():
+            for batch in tqdm(val_dataloader, desc="Validation"):
+                batch["clean_audio_downsampled_latents"] = batch["clean_audio_downsampled_latents"].to(self.device)
+                batch["noisy_audio_downsampled_latents"] = batch["noisy_audio_downsampled_latents"].to(self.device)
+
+                loss, loss_dict = self.forward(batch)
+                val_loss += loss.item()
+                val_steps += 1
+
+                self.log_to_tensorboard(writer, loss_dict, val_steps + epoch * len(val_dataloader), prefix="val", batch=batch)
+
+                if val_steps == 1:
+                    self.log_reconstruction(writer, batch, epoch)
+        
+        avg_val_loss = val_loss / val_steps
+        writer.add_scalar("Loss/Validation", avg_val_loss, epoch)
+        return avg_val_loss
+    
+    def log_to_tensorboard(self, writer, loss_dict, global_step, prefix="train", batch=None, noise=None):
+        for k, v in loss_dict.items():
+            writer.add_scalar(f"{k}", v.item(), global_step)
+        
+        if prefix == "val":
+            assert batch is not None, "Batch must be provided for validation logging"
+            with torch.no_grad():
+                clean_latents = batch["clean_audio_downsampled_latents"]
+                degraded_latents = batch["noisy_audio_downsampled_latents"]
+
+                noise = default(noise, lambda: torch.randn_like(clean_latents))
+                t = torch.randint(0, self.num_timesteps, (clean_latents.shape[0],), device=self.device).long()
+                z_t = self.q_sample(x_start=clean_latents, t=t, noise=noise)
+                pred = self.p_estimator(z_t, t, degraded_latents)
+
+                writer.add_histogram(f"{prefix}/pred_histogram", pred.flatten(), global_step)
+                writer.add_histogram(f"{prefix}/gt_histogram", clean_latents.flatten(), global_step)
+    
+    def log_reconstruction(self, writer, batch, epoch): ####### BELUM SELESAI ########
+        with torch.no_grad():
+            # 1. Ambil latents dari batch. Pada saat ini, batch sedang memiliki padding. Jadi kita perlu menghilangkan padding tersebut.
+            degraded_audio_latents = batch["noisy_audio_downsampled_latents"][0].unsqueeze(0)
+            clean_audio_latents = batch["clean_audio_downsampled_latents"][0].unsqueeze(0)
+            # print(f"1 -> {degraded_audio_latents.shape}, {clean_audio_latents.shape}") # uncomment untuk debug
+            
+
+            # 2. Sampel latents dari p_sample_loop
+            recon_audio_latents = self.sample_with_ema(degraded_audio_latents, batch_size=1)
+            
+            # Rescale latents if std_scale_factor is provided (1/std_scale_factor * latents)
+            if self.std_scale_factor:
+                recon_audio_latents = recon_audio_latents * self.std_scale_factor
+
+            # 3. Dapatkan informasi mengenai panjang laten asli dari batch
+            first_length = batch["lengths"][0]
+            # print(f"3 -> {first_length}") # uncomment untuk debug
+
+            # 4. Ambil latents yang telah disampel dan dari batch dan hilangkan padding, sehingga kita mendapatkan panjang
+            # aslinya.
+            degraded_audio_latents = degraded_audio_latents[:, :, :first_length]
+            recon_audio_latents = recon_audio_latents[:, :, :first_length]
+            clean_audio_latents = clean_audio_latents[:, :, :first_length]
+            # print(f"4 -> {degraded_audio_latents.shape}, {recon_audio_latents.shape}, {clean_audio_latents.shape}") # uncomment untuk debug
+
+            recon_audio_latents, _ = self.quantizer.residual_fsq(recon_audio_latents.mT)
+            clean_audio_latents, _ = self.quantizer.residual_fsq(clean_audio_latents.mT)
+
+            recon_audio_upsampled_latents = self.quantizer.upsample(recon_audio_latents.mT)
+            clean_audio_upsampled_latents = self.quantizer.upsample(clean_audio_latents.mT)
+
+            # print(f"4 -> {recon_audio_upsampled_latents.shape}, {clean_audio_upsampled_latents.shape}") # uncomment untuk debug
+
+            diff = batch["melspec_lengths"][0] - recon_audio_upsampled_latents.shape[-1] # Masih salah, wip
+            left = max(diff // 2, 0)  # Pastikan left tidak negatif
+            right = max(diff - left, 0)
+            
+            if diff > 0:
+                recon_audio_upsampled_latents = F.pad(recon_audio_upsampled_latents, (left, right))
+                clean_audio_upsampled_latents = F.pad(clean_audio_upsampled_latents, (left, right))
+            elif diff < 0:
+                left = max(-diff // 2, 0)  # Pastikan slicing dimulai dari 0
+                right = recon_audio_upsampled_latents.shape[-1] + diff + left
+                recon_audio_upsampled_latents = recon_audio_upsampled_latents[..., left:right]
+                clean_audio_upsampled_latents = clean_audio_upsampled_latents[..., left:right]
+
+            # print(f"5 -> {recon_audio_upsampled_latents.shape}, {clean_audio_upsampled_latents.shape}") # uncomment untuk debug
+
+            recon_audio = self.decode(recon_audio_upsampled_latents)
+            clean_audio = self.decode(clean_audio_upsampled_latents)
+
+            # print(f"6 -> {recon_audio.shape}, {clean_audio.shape}") # uncomment untuk debug
+
+            writer.add_audio(f"Reconstructed Audio", recon_audio[0].cpu(), epoch, sample_rate=44100)
+            writer.add_audio(f"Clean Audio", clean_audio[0].cpu(), epoch, sample_rate=44100)
+        
+    def save_checkpoint(self, epoch):
+        """Simpan weight model"""
+        checkpoint = {
+            "epoch": epoch,
+            "model_state_dict": self.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "ema_state_dict": self.ema.shadow if self.use_ema else None
+        }
+        checkpoint_path = os.path.join(self.save_dir, f"wave_lldm_epoch_{epoch}.pth")
+        torch.save(checkpoint, checkpoint_path)
+        print(f"Checkpoint saved at {checkpoint_path}")
