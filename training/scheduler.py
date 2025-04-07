@@ -1,6 +1,15 @@
+import math
 from math import cos, pi, floor, sin
-
 from torch.optim import lr_scheduler
+from torch.optim.lr_scheduler import LambdaLR
+
+def linear_warmup_cosine_decay(warmup_steps=1000, total_steps=500_000):
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return current_step / warmup_steps
+        progress = (current_step - warmup_steps) / (total_steps - warmup_steps)
+        return 0.5 * (1 + math.cos(math.pi * progress))
+    return lr_lambda
 
 class ExponentialLRDecay(lr_scheduler._LRScheduler):
     def __init__(self, optimizer, gamma=0.998, decay_steps=2000, last_epoch=-1):
