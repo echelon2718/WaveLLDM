@@ -28,6 +28,29 @@ Selanjutnya, akan dibangun model **U-Net** yang bekerja di **latent space** untu
 ## 📂 **Dataset**
 - **Training:** Voicebank+DEMAND dan dataset terkait lainnya.
 - **Evaluation:** LJSpeech dengan metrik **Mean Opinion Score (MOS)**.
+Struktur Filesystem Dataset:
+```
+voicebank_demand_56spk/
+├── clean_speech_audios/
+│   ├── train/
+│   │   ├── p234_001.wav
+│   │   ├── p234_002.wav
+│   │   └── ...
+│   └── test/
+│       ├── p232_001.wav
+│       ├── p232_002.wav
+│       └── ...
+├── noisy_speech_audios/
+    ├── train/
+    │   ├── p234_001.wav
+    │   ├── p234_002.wav
+    │   └── ...
+    └── test/
+        ├── p232_001.wav
+        ├── p232_002.wav
+        └── ...
+```
+
 
 ## 🚀 **Instalasi dan Penggunaan**
 ### **1. Install Dependencies**
