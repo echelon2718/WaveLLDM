@@ -28,6 +28,7 @@ Selanjutnya, akan dibangun model **U-Net** yang bekerja di **latent space** untu
 ## 📂 **Dataset**
 - **Training:** Voicebank+DEMAND dan dataset terkait lainnya.
 - **Evaluation:** LJSpeech dengan metrik **Mean Opinion Score (MOS)**.
+
 Struktur Filesystem Dataset:
 ```
 voicebank_demand_56spk/
