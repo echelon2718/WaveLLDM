@@ -26,7 +26,7 @@ Model ini dilatih menggunakan kombinasi dari empat fungsi loss:
 4. **Multiscale STFT Spectral Loss** (Lambda = **20**)
 
 ## 🔨 **Arsitektur Diffusion**
-Selanjutnya, kami mengusulkan **Rotary U-Net**, sebuah model **U-Net** yang bekerja di **latent space** untuk melakukan difusi laten. Arsitektur U-Net ini akan didukung dengan **Rarallel 1D Residual Convolutional Block** dan **Rotary Attention Mechanism**, yang membantu dalam memahami konteks sekuensial audio.
+Selanjutnya, kami mengusulkan **Rotary U-Net**, sebuah model **U-Net** yang bekerja di **latent space** untuk melakukan difusi laten. Arsitektur U-Net ini akan didukung dengan **Parallel 1D Residual Convolutional Block** dan **Rotary Attention Mechanism**, yang membantu dalam memahami konteks sekuensial audio.
 
 ![WaveLLDM Architecture](https://github.com/echelon2718/WaveLLDM/blob/main_new/assets/Rotary_UNET.png)
 
