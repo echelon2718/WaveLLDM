@@ -30,6 +30,47 @@ Selanjutnya, kami mengusulkan **Rotary U-Net**, sebuah model **U-Net** yang beke
 
 ![WaveLLDM Architecture](https://github.com/echelon2718/WaveLLDM/blob/main_new/assets/Rotary_UNET.png)
 
+WaveLLDM dilatih menggunakan prinsip **Denoising Diffusion Probabilistic Models (DDPM)** dalam **ruang laten**, dengan proses difusi maju dan balik sebagai berikut. 
+
+### 1. 🔄 Proses Difusi Maju (Forward Diffusion)
+Model menambahkan noise secara bertahap ke representasi laten $z_0$ hingga menjadi noise murni $z_T$. Proses ini dinyatakan dengan:
+
+$$
+z_t = \sqrt{\bar{\alpha}_t} z_0 + \sqrt{1 - \bar{\alpha}_t} \, \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)
+$$
+
+dengan:
+- $\alpha_t = 1 - \beta_t$  
+- $\bar{\alpha}\_t = \prod_{s=1}^t \alpha_s$  
+- $\beta_t$ ditentukan melalui **cosine beta schedule** (Nichol & Dhariwal, 2021).
+
+### 2. 🔁 Proses Reverse (Sampling)
+Model mempelajari distribusi balik $p_\theta(z_{t-1} \mid z_t)$, yang diasumsikan Gaussian:
+
+$$
+p_\theta(z_{t-1} \mid z_t) = \mathcal{N}(z_{t-1}; \mu_\theta(z_t, t), \Sigma_\theta(z_t, t) I)
+$$
+
+Dengan parameterisasi:
+  
+$$
+\mu_\theta(z_t, t) = \frac{1}{\sqrt{\alpha_t}} \left(z_t - \frac{1 - \alpha_t}{\sqrt{1 - \bar{\alpha}\_t}} \epsilon_\theta(z_t, t) \right)
+$$  
+
+$$
+\Sigma_\theta(z_t, t) = \frac{1 - \bar{\alpha}_{t-1}}{1 - \bar{\alpha}_t} \cdot \beta_t
+$$
+
+### 3. 🧠 Tujuan Pelatihan
+
+Alih-alih merekonstruksi $z_0$, model cukup memprediksi noise ($\epsilon$) yang ditambahkan. Loss yang digunakan:  
+
+$$
+\mathcal{L}\_{\text{simple}} = \mathbb{E}\_{z_0, \epsilon, t} \left\[ \left\| \epsilon - \epsilon_\theta \left(\sqrt{\bar{\alpha}_t} z_0 + \sqrt{1 - \bar{\alpha}_t} \epsilon, t \right) \right\|^2 \right\]
+$$  
+
+Loss ini dikenal sebagai **denoising score matching loss**, dan cukup untuk mempelajari proses reverse difusi.
+
 ## 📂 **Dataset**
 - **Training:** Voicebank+DEMAND dan dataset terkait lainnya.
 - **Evaluation:** LJSpeech dengan metrik **Mean Opinion Score (MOS)**.
