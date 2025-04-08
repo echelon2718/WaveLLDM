@@ -111,4 +111,4 @@ Setelah model difusi selesai, WaveLLDM akan diimplementasikan dalam:
 - **Perangkat Tepi (Android)** untuk denoising suara langsung dari perangkat.
 
 ## 📄 **Lisensi**
-Lisensi akan ditentukan nanti.
+Properti intelektual ini dilindungi oleh lisensi CC-BY-NC. Baca dokumen LICENSE-CC-BY-NC untuk keterangan lebih lanjut
