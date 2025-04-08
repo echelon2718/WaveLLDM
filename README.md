@@ -4,7 +4,7 @@ Kevin Putra Santoso (2025)
 
 Wave Lightweight Latent Diffusion Models (WaveLLDM) adalah model difusi laten berbasis deep learning yang dirancang untuk melakukan proses denoising audio pada perangkat tepi. WaveLLDM bertujuan meningkatkan kualitas dan restorasi suara ucapan dengan efisiensi komputasi yang lebih baik dibandingkan model difusi konvensional.
 
-![WaveLLDM Architecture](https://github.com/echelon2718/WaveLLDM/assets/WaveLLDM_Architecture)
+![WaveLLDM Architecture](https://github.com/echelon2718/WaveLLDM/blob/main_new/assets/WaveLLDM_Arch.png)
 
 ## 📌 **Latar Belakang**
 Model berbasis difusi telah menunjukkan keunggulan dalam sintesis audio, dengan stabilitas pelatihan yang lebih baik dibandingkan Generative Adversarial Networks (GAN) dan model autoregresif. Namun, tantangan utama model ini adalah tingginya kebutuhan daya komputasi. WaveLLDM dikembangkan sebagai solusi dengan arsitektur yang lebih ringan, memungkinkan implementasi pada perangkat tepi seperti Android dan aplikasi web.
@@ -14,6 +14,7 @@ WaveLLDM terdiri dari tiga komponen utama dalam generator:
 1. **ConvNeXt Encoder**: Memproses spektogram mel audio menjadi representasi laten $z$ dengan dimensi laten **384 × L**.
 2. **Grouped Residual Finite Scalar Quantization (GFSQ)**: Melakukan kuantisasi pada $\vec{z}$ menjadi $\vec{z_q}$ menggunakan GFSQ. WaveLLDM menggunakan **4 codebook**, dengan level per codebook: **[8, 8, 8, 6, 5]**.
 3. **HiFi-GAN Decoder**: Mengembalikan $\vec{z_q}$ menjadi audio asal.
+![FFGAN Components](https://github.com/echelon2718/WaveLLDM/blob/main_new/assets/FireflyGAN_Components.png)
 
 Selain itu, Neural Audio Codec WaveLLDM dilengkapi dengan **HiFi-GAN Discriminator**: Multi-Period Discriminator (MPD) dan Multi-Scale Discriminator (MSD).
 
@@ -27,7 +28,7 @@ Model ini dilatih menggunakan kombinasi dari empat fungsi loss:
 ## 🔨 **Arsitektur Diffusion**
 Selanjutnya, kami mengusulkan **Rotary U-Net**, sebuah model **U-Net** yang bekerja di **latent space** untuk melakukan difusi laten. Arsitektur U-Net ini akan didukung dengan **Rarallel 1D Residual Convolutional Block** dan **Rotary Attention Mechanism**, yang membantu dalam memahami konteks sekuensial audio.
 
-
+![WaveLLDM Architecture](https://github.com/echelon2718/WaveLLDM/blob/main_new/assets/Rotary_UNET.png)
 
 ## 📂 **Dataset**
 - **Training:** Voicebank+DEMAND dan dataset terkait lainnya.
@@ -55,7 +56,6 @@ voicebank_demand_56spk/
         ├── p232_002.wav
         └── ...
 ```
-
 
 ## 🚀 **Instalasi dan Penggunaan**
 ### **1. Install Dependencies**
