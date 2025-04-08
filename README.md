@@ -60,17 +60,33 @@ pip install -r requirements.txt
 ```
 
 ### **2. Training Model**
-Gunakan skrip `train_vctk.py` dengan parameter berikut (sesuaikan jika diperlukan):
+Gunakan skrip `train_vctk.py` dengan parameter berikut (sesuaikan jika diperlukan) untuk melatih model tahap 1 (1st stage training):
 ```bash
 python train_vctk.py \
-  --clean_data_path ./vctk/clean_trainset_56spk_wav/clean_trainset_56spk_wav/ \
-  --noisy_data_path ./vctk/noisy_trainset_56spk_wav/noisy_trainset_56spk_wav/ \
+  --clean_data_path ./data/vctk/voicebank_demand_56spk/clean_speech_audios/train/ \
+  --noisy_data_path ./data/vctk/voicebank_demand_56spk/noisy_speech_audios/train/ \
   --add_random_cutting True \
   --batch_size 16 \
   --lr 2e-5 \
   --use_scheduler True \
   --epochs 100 \
   --num_workers 16
+```
+
+Gunakan skrip `train_wavelldm.py` dengan parameter berikut untuk melatih model tahap 2 (2nd stage training):
+```bash
+python train_wavelldm.py \
+  --clean_data_path ./data/vctk/voicebank_demand_56spk/clean_speech_audios/train/ \
+  --noisy_data_path ./data/vctk/voicebank_demand_56spk/noisy_speech_audios/train/ \
+  --add_random_cutting True \
+  --max_cuts 7 \
+  --cut_duration 0.45 \ # inpainting 50 - 450ms
+  --batch_size 64 \
+  --val_batch_size 16 \
+  --epochs 400 \
+  --lr 3e-5 \
+  --num_workers 16 \
+  --pretrained_codec_path ./pretrained_models/generator_step_142465.pth
 ```
 
 ## ✅ **Progress Saat Ini**
