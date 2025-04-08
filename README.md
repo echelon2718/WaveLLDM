@@ -4,6 +4,8 @@ Kevin Putra Santoso (2025)
 
 Wave Lightweight Latent Diffusion Models (WaveLLDM) adalah model difusi laten berbasis deep learning yang dirancang untuk melakukan proses denoising audio pada perangkat tepi. WaveLLDM bertujuan meningkatkan kualitas dan restorasi suara ucapan dengan efisiensi komputasi yang lebih baik dibandingkan model difusi konvensional.
 
+![WaveLLDM Architecture](https://github.com/echelon2718/WaveLLDM/assets/WaveLLDM_Architecture.png)
+
 ## 📌 **Latar Belakang**
 Model berbasis difusi telah menunjukkan keunggulan dalam sintesis audio, dengan stabilitas pelatihan yang lebih baik dibandingkan Generative Adversarial Networks (GAN) dan model autoregresif. Namun, tantangan utama model ini adalah tingginya kebutuhan daya komputasi. WaveLLDM dikembangkan sebagai solusi dengan arsitektur yang lebih ringan, memungkinkan implementasi pada perangkat tepi seperti Android dan aplikasi web.
 
@@ -22,8 +24,10 @@ Model ini dilatih menggunakan kombinasi dari empat fungsi loss:
 3. **Multiscale Mel Spectrogram Loss** (Lambda = **65**)
 4. **Multiscale STFT Spectral Loss** (Lambda = **20**)
 
-## 🔨 **Arsitektur Diffusion (Coming Soon)**
-Selanjutnya, akan dibangun model **U-Net** yang bekerja di **latent space** untuk melakukan difusi laten. Arsitektur U-Net ini akan didukung dengan **Rarallel 1D Residual Convolutional Block** dan **Rotary Attention Mechanism**, yang membantu dalam memahami konteks sekuensial audio.
+## 🔨 **Arsitektur Diffusion**
+Selanjutnya, kami mengusulkan **Rotary U-Net**, sebuah model **U-Net** yang bekerja di **latent space** untuk melakukan difusi laten. Arsitektur U-Net ini akan didukung dengan **Rarallel 1D Residual Convolutional Block** dan **Rotary Attention Mechanism**, yang membantu dalam memahami konteks sekuensial audio.
+
+
 
 ## 📂 **Dataset**
 - **Training:** Voicebank+DEMAND dan dataset terkait lainnya.
