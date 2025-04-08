@@ -23,7 +23,6 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=300, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=3e-5, help="Learning rate")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of DataLoader workers")
-    parser.add_argument("--use_scheduler", type=bool, default=False, help="Choose whether to use lr scheduler or not")
     parser.add_argument("--pretrained_codec_path", type=str, default="./pretrained_models/generator_step_142465.pth", help="Path to pretrained codec model")
     return parser.parse_args()
 
@@ -189,8 +188,7 @@ def train(args):
         save_dir="./checkpoints",
         log_dir="./logs/wavelldm",
         save_every=5,
-        device=device,
-        use_scheduler=args.use_scheduler
+        device=device
     )
 
     print("Starting training 2nd-stage model...")
