@@ -348,21 +348,24 @@ class WaveLLDM(DDPM):
     ):
         super().__init__(*args, **kwargs)
         self.log_every_t = kwargs.get('log_every_t', 100) # log every t steps
+        self.beta_scheduler = kwargs.get('beta_scheduler', 'cosine') # beta scheduler untuk mengatur intensitas noise
         self.original_elbo_weight = kwargs.get('original_elbo_weight', 1.0) # bobot untuk original elbo loss
 
         self.std_scale_factor = std_scale_factor
         self.z_dim = z_dim
 
         self.encoder = encoder.to(self.device)
-        self.encoder.eval()
-
         self.decoder = decoder.to(self.device)
-        self.decoder.eval()
-
         self.ema = EMA(self.p_estimator, decay=ema_decay)
-
         self.quantizer = quantizer.to(self.device)
-        self.quantizer.eval() 
+
+        # Freeze pretrained components
+        self.encoder.requires_grad_(False)
+        self.quantizer.requires_grad_(False)
+        self.decoder.requires_grad_(False)
+        self.encoder.eval()
+        self.quantizer.eval()
+        self.decoder.eval()
 
         if optimizer == "adamw":
             self.optimizer = AdamW(self.parameters(), lr=lr)
