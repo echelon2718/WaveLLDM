@@ -80,6 +80,7 @@ class DDPM(nn.Module):
         parameterization: str = "eps", # parametrisasi untuk noise (eps atau x0)
         learn_logvar: bool = False,
         logvar_init: float = 0.0,
+        recon_loss_weight: float = 0.01,
         device: str = "cuda" if torch.cuda.is_available() else "cpu", # perangkat untuk model (CPU atau GPU)
     ):
         super().__init__()
@@ -88,7 +89,7 @@ class DDPM(nn.Module):
         self.clip_denoised = clip_denoised
         self.loss_type = loss_type
         self.device = device
-
+        self.recon_loss_weight = recon_loss_weight
         self.p_estimator = p_estimator
 
         # ================= parameter untuk difusi ================= #
@@ -284,6 +285,7 @@ class DDPM(nn.Module):
             loss = (target - pred).abs()
             if mean:
                 loss = loss.mean()
+
         elif self.loss_type == 'l2':
             if mean:
                 loss = torch.nn.functional.mse_loss(target, pred)
@@ -294,7 +296,7 @@ class DDPM(nn.Module):
 
         return loss
     
-    def p_losses(self, x_start, t, noise=None):
+    def p_losses(self, x_start, t, noise=None, add_recon_loss=False):
         noise = default(noise, lambda: torch.randn_like(x_start))
         print("Noise shape: ", noise.shape)
         print("x_start shape: ", x_start.shape)
@@ -320,6 +322,18 @@ class DDPM(nn.Module):
         loss_vlb = (self.lvlb_weights[t] * loss).mean()
         loss_dict.update({f'{log_prefix}/loss_vlb': loss_vlb})
 
+        if add_recon_loss:
+            # Compute reconstruction loss
+            x_recon = self.predict_start_from_noise(x_noisy, t=t, noise=model_out)
+            if self.learn_logvar:
+                logvar = self.logvar[t]
+                recon_loss = 0.5 * (logvar + ((x_start - x_recon) ** 2) / torch.exp(logvar)).mean()
+            else:
+                recon_loss = self.get_loss(x_start, x_recon, mean=True)
+            
+            loss_dict.update({f'{log_prefix}/loss_recon': recon_loss})
+            loss_simple += self.recon_loss_weight * recon_loss
+        
         loss = loss_simple + self.original_elbo_weight * loss_vlb
 
         loss_dict.update({f'{log_prefix}/loss': loss})
@@ -376,6 +390,8 @@ class WaveLLDM(DDPM):
         else:
             raise ValueError(f"Unknown optimizer: {optimizer}")
 
+        self.use_lr_scheduler = use_lr_scheduler
+
         if use_lr_scheduler:
             self.scheduler = LambdaLR(self.optimizer, lr_lambda=linear_warmup_cosine_decay())
 
@@ -421,20 +437,20 @@ class WaveLLDM(DDPM):
             x_recon.clamp_(-1., 1.)
         return self.q_posterior(x_start=x_recon, x_t=x, t=t)
 
-    def p_losses(self, x_start, t, y, noise=None):
+    def p_losses(self, z_start, t, y, noise=None, add_recon_loss=False):
         # Generate noise if not provided
-        noise = default(noise, lambda: torch.randn_like(x_start))
+        noise = default(noise, lambda: torch.randn_like(z_start))
         # Sample noisy latents from q(x_t | x_0)
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+        z_noisy = self.q_sample(x_start=z_start, t=t, noise=noise)
         # Predict noise (or x0) conditioned on degraded latents y
-        model_out = self.p_estimator(x_noisy, t, y)
+        model_out = self.p_estimator(z_noisy, t, y)
         
         loss_dict = {}
         # Determine target based on parameterization
         if self.parameterization == "eps":
             target = noise
         elif self.parameterization == "x0":
-            target = x_start
+            target = z_start
         else:
             raise NotImplementedError(f"Parameterization {self.parameterization} not supported")
         
@@ -445,6 +461,19 @@ class WaveLLDM(DDPM):
         # Update loss dictionary
         loss_dict.update({f'{log_prefix}/loss_simple': loss.mean()})
         loss_simple = loss.mean() * self.l_simple_weight
+
+        if add_recon_loss:
+            # Compute reconstruction loss
+            x_recon = self.predict_start_from_noise(z_noisy, t=t, noise=model_out)
+            if self.learn_logvar:
+                logvar = self.logvar[t]
+                recon_loss = 0.5 * (logvar + ((z_start - x_recon) ** 2) / torch.exp(logvar)).mean()
+            else:
+                recon_loss = self.get_loss(z_start, x_recon, mean=True)
+            
+            loss_dict.update({f'{log_prefix}/loss_recon': recon_loss})
+            loss_simple += self.recon_loss_weight * recon_loss
+
         loss_vlb = (self.lvlb_weights[t] * loss).mean()
         loss_dict.update({f'{log_prefix}/loss_vlb': loss_vlb})
         loss = loss_simple + self.original_elbo_weight * loss_vlb
@@ -508,7 +537,7 @@ class WaveLLDM(DDPM):
         t = torch.randint(0, self.num_timesteps, (clean_latents.shape[0],), device=self.device).long()
         
         # Compute loss using p_losses, conditioned on degraded_latents
-        loss, loss_dict = self.p_losses(clean_latents, t, degraded_latents)
+        loss, loss_dict = self.p_losses(clean_latents, t, degraded_latents, add_recon_loss=True)
         return loss, loss_dict
     
     def train_step(self, batch):
