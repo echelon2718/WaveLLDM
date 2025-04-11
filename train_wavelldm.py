@@ -11,6 +11,11 @@ from training.dataset_vctk import DenoiserDataset, collate_fn_latents
 from models.lldm_architecture import WaveLLDM
 from training.trainer_wavelldm import WaveLLDMTrainer
 
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
+import os
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train WaveLLDM: Denoise and Restore your Audio with an End-to-end Diffusion-powered Neural Audio Codec")
     parser.add_argument("--clean_data_path", type=str, required=True, help="Path to clean audio dataset")
@@ -22,6 +27,7 @@ def parse_args():
     parser.add_argument("--val_batch_size", type=int, default=4, help="Batch size for validation")
     parser.add_argument("--epochs", type=int, default=300, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=3e-5, help="Learning rate")
+    parser.add_argument("--use_lr_scheduler", type=bool, default=True, help="Choose whether using LR scheduler or not")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of DataLoader workers")
     parser.add_argument("--pretrained_codec_path", type=str, default="./pretrained_models/generator_step_142465.pth", help="Path to pretrained codec model")
     return parser.parse_args()
@@ -30,8 +36,19 @@ def parse_args():
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
 
+def ddp_setup():
+    init_process_group(backend="nccl")
+
 def train(args):
-    # Model components
+    # Initialize DDP environment
+    ddp_setup()
+    # torch.cuda.set_device(rank)
+    # device = torch.device("cuda", rank)
+    # print(f"Process {rank} using device: {device}")
+
+    # ----------------------
+    # Model components setup
+    # ----------------------
     backbone = models.ConvNeXtEncoder(
         input_channels=160,
         depths=[3, 3, 9, 3],
@@ -85,7 +102,9 @@ def train(args):
     ffgan.load_state_dict(torch.load(args.pretrained_codec_path))
     ffgan.eval()
 
-    # CPU components for dataset preprocessing
+    # -----------------------------
+    # CPU components for preprocessing
+    # -----------------------------
     spec_trans_cpu = LogMelSpectrogram(
         sample_rate=44100,
         n_mels=160,
@@ -127,7 +146,9 @@ def train(args):
     quantizer_cpu.load_state_dict(ffgan.quantizer.state_dict())
     decoder_cpu.load_state_dict(ffgan.head.state_dict())
 
-    # Datasets
+    # ----------------------
+    # Setup datasets and Distributed Samplers
+    # ----------------------
     train_ds = DenoiserDataset(
         args.clean_data_path,
         args.noisy_data_path,
@@ -140,7 +161,7 @@ def train(args):
     )
 
     val_ds = DenoiserDataset(
-        args.clean_data_path.replace("train", "test"),  # Assuming test data follows this pattern
+        args.clean_data_path.replace("train", "test"),
         args.noisy_data_path.replace("train", "test"),
         args.add_random_cutting,
         stage=3,
@@ -150,14 +171,18 @@ def train(args):
         device=device
     )
 
+    train_sampler = DistributedSampler(train_ds)
+    val_sampler = DistributedSampler(val_ds)
+
     # DataLoaders
     train_dataloader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=False,
         num_workers=args.num_workers,
         collate_fn=collate_fn_latents,
-        pin_memory=True  # Faster data transfer to GPU
+        pin_memory=True,  # Faster data transfer to GPU
+        sampler=train_sampler
     )
 
     val_dataloader = DataLoader(
@@ -166,17 +191,21 @@ def train(args):
         shuffle=False,
         num_workers=args.num_workers,
         collate_fn=collate_fn_latents,
-        pin_memory=True
+        pin_memory=True,
+        sampler=val_sampler
     )
 
+    # ----------------------
+    # Build the WaveLLDM
+    # ----------------------
     wavelldm = WaveLLDM(
         p_estimator=unet,
-        learn_logvar=True,
+        learn_logvar=False,
         encoder=ffgan.backbone,
         quantizer=ffgan.quantizer,
         decoder=ffgan.head,
         beta_scheduler="cosine"
-    ).to(device)
+    )
 
     # Initialize and train
     trainer = WaveLLDMTrainer(
@@ -185,18 +214,19 @@ def train(args):
         val_dataloader=val_dataloader,
         epochs=args.epochs,
         lr=args.lr,
+        use_lr_scheduler=args.use_lr_scheduler,
         save_dir="./checkpoints",
         log_dir="./logs/wavelldm",
         save_every=5,
-        device=device
+        snapshot_path=None
     )
 
     print("Starting training 2nd-stage model...")
     trainer.train()
 
-if __name__ == "__main__":
-    mp.set_start_method('spawn', force=True)
-    torch.autograd.set_detect_anomaly(True)
+    destroy_process_group()
 
+if __name__ == "__main__":
+    torch.autograd.set_detect_anomaly(True)
     args = parse_args()
     train(args)
