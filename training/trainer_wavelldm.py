@@ -44,6 +44,7 @@ class WaveLLDMTrainer:
         self.model.encoder = self.model.encoder.to(self.local_rank)
         self.model.decoder = self.model.decoder.to(self.local_rank)
         self.model.quantizer = self.model.quantizer.to(self.local_rank)
+        self.model.p_estimator = self.model.p_estimator.to(self.local_rank)
         self.model.device = self.local_rank
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
