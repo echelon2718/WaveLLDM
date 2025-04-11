@@ -33,7 +33,7 @@ def parse_args():
     return parser.parse_args()
 
 # Device setup
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = int(os.environ["LOCAL_RANK"])
 print(f"Using device: {device}")
 
 def ddp_setup():
@@ -42,9 +42,6 @@ def ddp_setup():
 def train(args):
     # Initialize DDP environment
     ddp_setup()
-    # torch.cuda.set_device(rank)
-    # device = torch.device("cuda", rank)
-    # print(f"Process {rank} using device: {device}")
 
     # ----------------------
     # Model components setup
@@ -196,7 +193,7 @@ def train(args):
     )
 
     # ----------------------
-    # Build the WaveLLDM
+    # Build and wrap the WaveLLDM model with DDP
     # ----------------------
     wavelldm = WaveLLDM(
         p_estimator=unet,
