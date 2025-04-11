@@ -32,16 +32,16 @@ def parse_args():
     parser.add_argument("--pretrained_codec_path", type=str, default="./pretrained_models/generator_step_142465.pth", help="Path to pretrained codec model")
     return parser.parse_args()
 
-# Device setup
-device = int(os.environ["LOCAL_RANK"])
-print(f"Using device: {device}")
-
 def ddp_setup():
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
     init_process_group(backend="nccl")
+    return local_rank
 
 def train(args):
     # Initialize DDP environment
-    ddp_setup()
+    local_rank = ddp_setup()
+    device = torch.device("cuda", local_rank)
 
     # ----------------------
     # Model components setup
@@ -201,7 +201,8 @@ def train(args):
         encoder=ffgan.backbone,
         quantizer=ffgan.quantizer,
         decoder=ffgan.head,
-        beta_scheduler="cosine"
+        beta_scheduler="cosine",
+        device=device
     )
 
     # Initialize and train
