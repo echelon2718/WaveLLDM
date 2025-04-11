@@ -1,0 +1,1 @@
+torchrun --nnodes=4 --nproc-per-node=1 --rdzv-backend=c10d --rdzv-endpoint=192.168.1.10:29500 ./train_wavelldm.py --clean_data_path ./data/voicebank_demand_56spk/clean_speech_audios/train/ --noisy_data_path ./data/voicebank_demand_56spk/noisy_speech_audios/train/ --max_cuts 7 --cut_duration 0.45 batch_size 32 epochs 500
