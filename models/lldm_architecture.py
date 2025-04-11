@@ -81,7 +81,7 @@ class DDPM(nn.Module):
         learn_logvar: bool = False,
         logvar_init: float = 0.0,
         recon_loss_weight: float = 0.0,
-        device: str = "cuda" if torch.cuda.is_available() else "cpu", # perangkat untuk model (CPU atau GPU)
+        device: int = int(os.environ["LOCAL_RANK"]), # perangkat untuk model (CPU atau GPU)
     ):
         super().__init__()
         assert parameterization in ["eps", "x0"], 'currently only supporting "eps" and "x0"'
