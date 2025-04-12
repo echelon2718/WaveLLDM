@@ -69,7 +69,7 @@ class WaveLLDMTrainer:
         else:
             raise ValueError(f"Unknown optimizer: {optimizer}")
 
-        self.model = DDP(self.model, device_ids=[self.local_rank])
+        self.model = DDP(self.model, device_ids=[self.local_rank], find_unused_parameters=True)
         self.use_lr_scheduler = use_lr_scheduler
 
         if use_lr_scheduler:
@@ -128,8 +128,8 @@ class WaveLLDMTrainer:
 
         with torch.no_grad():
             for batch in tqdm(val_dataloader, desc="Validation"):
-                batch["clean_audio_downsampled_latents"] = batch["clean_audio_downsampled_latents"].to(self.device)
-                batch["noisy_audio_downsampled_latents"] = batch["noisy_audio_downsampled_latents"].to(self.device)
+                batch["clean_audio_downsampled_latents"] = batch["clean_audio_downsampled_latents"].to(self.local_rank)
+                batch["noisy_audio_downsampled_latents"] = batch["noisy_audio_downsampled_latents"].to(self.local_rank)
 
                 loss, loss_dict = self.model(batch)
                 val_loss += loss.item()
@@ -209,7 +209,7 @@ class WaveLLDMTrainer:
                 degraded_latents = batch["noisy_audio_downsampled_latents"]
 
                 noise = default(noise, lambda: torch.randn_like(clean_latents))
-                t = torch.randint(0, self.num_timesteps, (clean_latents.shape[0],), device=self.device).long()
+                t = torch.randint(0, self.num_timesteps, (clean_latents.shape[0],), device=self.local_rank).long()
                 z_t = self.model.module.q_sample(x_start=clean_latents, t=t, noise=noise)
                 pred = self.model.module.p_estimator(z_t, t, degraded_latents)
                 writer.add_histogram(f"{prefix}/pred_histogram", pred.flatten(), global_step)
