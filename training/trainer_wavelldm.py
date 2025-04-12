@@ -54,14 +54,11 @@ class WaveLLDMTrainer:
         self.save_every = save_every
 
         self.epochs_run = 0
+        self.lr = lr
 
-        if os.path.exists(snapshot_path):
+        if snapshot_path is not None:
             print("Loading snapshot...")
             self._load_snapshot(snapshot_path)
-
-        self.model = DDP(self.model, device_ids=[self.local_rank])
-
-        self.lr = lr
 
         if optimizer == "adamw":
             self.optimizer = AdamW(filter(lambda p: p.requires_grad, self.model.parameters()), lr=lr)
@@ -72,6 +69,7 @@ class WaveLLDMTrainer:
         else:
             raise ValueError(f"Unknown optimizer: {optimizer}")
 
+        self.model = DDP(self.model, device_ids=[self.local_rank])
         self.use_lr_scheduler = use_lr_scheduler
 
         if use_lr_scheduler:
@@ -85,9 +83,18 @@ class WaveLLDMTrainer:
     
     def _load_snapshot(self, snapshot_path):
         snapshot = torch.load(snapshot_path)
-        self.model.load_state_dict(snapshot["model_state_dict"])
+        try:
+            self.model.load_state_dict(snapshot["model_state_dict"])
+        except:
+            # Handle the case where the model is wrapped in DDP
+            self.model.module.load_state_dict(snapshot["model_state_dict"])
+
         self.optimizer.load_state_dict(snapshot["optimizer_state_dict"])
-        self.model.ema.shadow = snapshot["ema_state_dict"]
+        try:
+            self.model.ema.shadow = snapshot["ema_state_dict"]
+        except:
+            # Handle the case where the model is wrapped in DDP
+            self.model.module.ema.shadow = snapshot["ema_state_dict"]
         self.epochs_run = snapshot["epoch"]
         print(f"Resuming training from snapshot at epoch {self.epochs_run}")
 
@@ -101,7 +108,7 @@ class WaveLLDMTrainer:
 
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)  # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(self.model.module.parameters(), max_norm=1.0)  # Gradient clipping
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
@@ -109,13 +116,13 @@ class WaveLLDMTrainer:
             self.scheduler.step()
         
         # Update EMA parameters
-        if self.model.use_ema:
-            self.model.ema.update(self.model.p_estimator)
+        if self.model.module.use_ema:
+            self.model.module.ema.update(self.model.module.p_estimator)
         
         return loss, loss_dict
     
     def validate(self, epoch, val_dataloader, writer):
-        self.model.p_estimator.eval()
+        self.model.module.p_estimator.eval()
         val_loss = 0.0
         val_steps = 0
 
@@ -148,7 +155,7 @@ class WaveLLDMTrainer:
                 for idx, batch in enumerate(self.train_dataloader):
                     try:
                         self.optimizer.zero_grad()
-                        with amp.autocast():
+                        with amp.autocast(device_type="cuda"):
                             loss, loss_dict = self.train_step(batch)
                         
                         if torch.isnan(loss) or torch.isinf(loss):
@@ -203,8 +210,8 @@ class WaveLLDMTrainer:
 
                 noise = default(noise, lambda: torch.randn_like(clean_latents))
                 t = torch.randint(0, self.num_timesteps, (clean_latents.shape[0],), device=self.device).long()
-                z_t = self.model.q_sample(x_start=clean_latents, t=t, noise=noise)
-                pred = self.model.p_estimator(z_t, t, degraded_latents)
+                z_t = self.model.module.q_sample(x_start=clean_latents, t=t, noise=noise)
+                pred = self.model.module.p_estimator(z_t, t, degraded_latents)
                 writer.add_histogram(f"{prefix}/pred_histogram", pred.flatten(), global_step)
                 writer.add_histogram(f"{prefix}/gt_histogram", clean_latents.flatten(), global_step)
     
@@ -217,11 +224,11 @@ class WaveLLDMTrainer:
             
 
             # 2. Sampel latents dari p_sample_loop
-            recon_audio_latents = self.model.sample_with_ema(degraded_audio_latents, batch_size=1)
+            recon_audio_latents = self.model.module.sample_with_ema(degraded_audio_latents, batch_size=1)
             
             # Rescale latents if std_scale_factor is provided (1/std_scale_factor * latents)
-            if self.model.std_scale_factor:
-                recon_audio_latents = recon_audio_latents * self.model.std_scale_factor
+            if self.model.module.std_scale_factor:
+                recon_audio_latents = recon_audio_latents * self.model.module.std_scale_factor
 
             # 3. Dapatkan informasi mengenai panjang laten asli dari batch
             first_length = batch["lengths"][0]
@@ -234,11 +241,11 @@ class WaveLLDMTrainer:
             clean_audio_latents = clean_audio_latents[:, :, :first_length]
             # print(f"4 -> {degraded_audio_latents.shape}, {recon_audio_latents.shape}, {clean_audio_latents.shape}") # uncomment untuk debug
 
-            recon_audio_latents, _ = self.model.quantizer.residual_fsq(recon_audio_latents.mT)
-            clean_audio_latents, _ = self.model.quantizer.residual_fsq(clean_audio_latents.mT)
+            recon_audio_latents, _ = self.model.module.quantizer.residual_fsq(recon_audio_latents.mT)
+            clean_audio_latents, _ = self.model.module.quantizer.residual_fsq(clean_audio_latents.mT)
 
-            recon_audio_upsampled_latents = self.model.quantizer.upsample(recon_audio_latents.mT)
-            clean_audio_upsampled_latents = self.model.quantizer.upsample(clean_audio_latents.mT)
+            recon_audio_upsampled_latents = self.model.module.quantizer.upsample(recon_audio_latents.mT)
+            clean_audio_upsampled_latents = self.model.module.quantizer.upsample(clean_audio_latents.mT)
 
             # print(f"4 -> {recon_audio_upsampled_latents.shape}, {clean_audio_upsampled_latents.shape}") # uncomment untuk debug
 
@@ -257,8 +264,8 @@ class WaveLLDMTrainer:
 
             # print(f"5 -> {recon_audio_upsampled_latents.shape}, {clean_audio_upsampled_latents.shape}") # uncomment untuk debug
 
-            recon_audio = self.model.decode(recon_audio_upsampled_latents)
-            clean_audio = self.model.decode(clean_audio_upsampled_latents)
+            recon_audio = self.model.module.decode(recon_audio_upsampled_latents)
+            clean_audio = self.model.module.decode(clean_audio_upsampled_latents)
 
             # print(f"6 -> {recon_audio.shape}, {clean_audio.shape}") # uncomment untuk debug
 
