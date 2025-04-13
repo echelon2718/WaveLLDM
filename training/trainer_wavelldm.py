@@ -198,7 +198,7 @@ class WaveLLDMTrainer:
 
         self.writer.close()
     
-    def log_to_tensorboard(self, writer, loss_dict, global_step, prefix="train", batch=None, noise=None):
+    def log_to_tensorboard(self, writer, loss_dict, global_step, prefix="train", batch=None, noise=None, num_timesteps=1000):
         for k, v in loss_dict.items():
             writer.add_scalar(f"{k}", v.item(), global_step)
         
@@ -209,7 +209,7 @@ class WaveLLDMTrainer:
                 degraded_latents = batch["noisy_audio_downsampled_latents"]
 
                 noise = default(noise, lambda: torch.randn_like(clean_latents))
-                t = torch.randint(0, self.num_timesteps, (clean_latents.shape[0],), device=self.local_rank).long()
+                t = torch.randint(0, num_timesteps, (clean_latents.shape[0],), device=self.local_rank).long()
                 z_t = self.model.module.q_sample(x_start=clean_latents, t=t, noise=noise)
                 pred = self.model.module.p_estimator(z_t, t, degraded_latents)
                 writer.add_histogram(f"{prefix}/pred_histogram", pred.flatten(), global_step)
