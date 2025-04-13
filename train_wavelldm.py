@@ -30,6 +30,7 @@ def parse_args():
     parser.add_argument("--use_lr_scheduler", type=bool, default=True, help="Choose whether using LR scheduler or not")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of DataLoader workers")
     parser.add_argument("--pretrained_codec_path", type=str, default="./pretrained_models/generator_step_142465.pth", help="Path to pretrained codec model")
+    parser.add_argument("--snapshot_path", type=str, default=None, help="Path to latest training snapshot (optional)")
     return parser.parse_args()
 
 def ddp_setup():
@@ -216,7 +217,7 @@ def train(args):
         save_dir="./checkpoints",
         log_dir="./logs/wavelldm",
         save_every=5,
-        snapshot_path=None
+        snapshot_path=args.snapshot_path
     )
 
     print("Starting training 2nd-stage model...")
