@@ -518,5 +518,5 @@ class WaveLLDM(DDPM):
         t = torch.randint(0, self.num_timesteps, (clean_latents.shape[0],), device=self.device).long()
         
         # Compute loss using p_losses, conditioned on degraded_latents
-        loss, loss_dict = self.p_losses(clean_latents, t, degraded_latents, add_recon_loss=True)
+        loss, loss_dict = self.p_losses(clean_latents, t, degraded_latents, add_recon_loss=False)
         return loss, loss_dict
