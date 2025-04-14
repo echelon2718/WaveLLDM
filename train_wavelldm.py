@@ -5,7 +5,7 @@ import torch.multiprocessing as mp
 
 import models
 from models.modules import *
-from models.unet import create_diffusion_model
+from models.unet2d import create_diffusion_model
 from models.utils import LogMelSpectrogram
 from training.dataset_vctk import DenoiserDataset, collate_fn_latents
 from models.lldm_architecture import WaveLLDM
@@ -91,9 +91,10 @@ def train(args):
     ).to(device)
 
     unet = create_diffusion_model(
-        in_channels=1024,
-        base_channels=32,
-        out_channels=512
+        in_channels=2,
+        base_channels=64,
+        out_channels=1,
+        time_dim=64
     ).to(device)
 
     # Load pretrained weights and set to evaluation mode
