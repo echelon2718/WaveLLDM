@@ -108,25 +108,12 @@ class DenoiserDataset(Dataset):
         self.device = device
     
     def __getitem__(self, idx):
-        # Load audio clean
-        # clean_audio, clean_sr = librosa.load(os.path.join(self.clean_dir, self.clean_files[idx]), sr=44100)
         clean_audio, clean_sr = torchaudio.load(os.path.join(self.clean_dir, self.clean_files[idx]))
         clean_audio = clean_audio.unsqueeze(0)
-
-        # Pilih sample rate acak untuk audio noisy agar bervariasi, lalu resample ke clean_sr
-        # noisy_sr = int(clean_sr / (np.random.randint(1, 3) + 1))
-        # noisy_audio, noisy_sr = librosa.load(os.path.join(self.noisy_dir, self.noisy_files[idx]), sr=noisy_sr)
-        # noisy_audio = librosa.resample(noisy_audio, orig_sr=noisy_sr, target_sr=clean_sr)
-        # noisy_sr_new = clean_sr
         noisy_sr = int(clean_sr / (torch.randint(1, 3, (1,)).item() + 1))
         noisy_audio, orig_noisy_sr = torchaudio.load(os.path.join(self.noisy_dir, self.noisy_files[idx]))
         noisy_audio = noisy_audio.unsqueeze(0)
 
-        # Ubah ke tensor dan tambahkan dimensi channel
-        # clean_audio = torch.tensor(clean_audio).unsqueeze(0)
-        # noisy_audio = torch.tensor(noisy_audio).unsqueeze(0)
-
-        # Resample noisy audio ke clean_sr [BARU]
         if orig_noisy_sr != noisy_sr:
             resampler = Resample(orig_freq=orig_noisy_sr, new_freq=noisy_sr)
             noisy_audio = resampler(noisy_audio)
@@ -139,21 +126,6 @@ class DenoiserDataset(Dataset):
         if self.add_random_cutting:
             noisy_audio = random_cut(noisy_audio, max_cuts=self.max_cuts, cut_duration=self.cut_duration, sample_rate=clean_sr)
 
-        # Jika fixed_length diset, crop atau pad audio supaya panjangnya seragam
-        # if self.fixed_length is not None:
-        #     if clean_audio.size(-1) > self.fixed_length:
-        #         # Crop secara acak jika audio lebih panjang dari fixed_length
-        #         max_offset = clean_audio.size(-1) - self.fixed_length
-        #         offset = random.randint(0, max_offset)
-        #         clean_audio = clean_audio[..., offset:offset + self.fixed_length]
-        #         noisy_audio = noisy_audio[..., offset:offset + self.fixed_length]
-        #     else:
-        #         # Pad dengan nol jika audio lebih pendek dari fixed_length
-        #         pad_amount = self.fixed_length - clean_audio.size(-1)
-        #         clean_audio = torch.nn.functional.pad(clean_audio, (0, pad_amount))
-        #         noisy_audio = torch.nn.functional.pad(noisy_audio, (0, pad_amount))
-
-        ################### MODIFIKASI #######################
         if self.fixed_length is not None:
             audio_length = clean_audio.size(-1)
             if audio_length > self.fixed_length:
@@ -167,8 +139,6 @@ class DenoiserDataset(Dataset):
                 pad_amount = self.fixed_length - audio_length
                 clean_audio = F.pad(clean_audio, (0, pad_amount))
                 noisy_audio = F.pad(noisy_audio, (0, pad_amount))
-
-        #######################################################
 
         if self.encoder is not None and self.quantizer is not None:
             clean_audio_spec = self.spec_trans(clean_audio.to("cpu"))
@@ -190,10 +160,10 @@ class DenoiserDataset(Dataset):
                 zq_down_noisy_audio = self.quantizer(noisy_audio_latent).latents
 
             item = {
-                "zq_down_clean_audio": zq_down_clean_audio.to(self.device),
-                "zq_down_noisy_audio": zq_down_noisy_audio.to(self.device),
-                "clean_audio_tensor": clean_audio_spec.to(self.device),
-                "noisy_audio_tensor": noisy_audio_spec.to(self.device),
+                "zq_down_clean_audio": zq_down_clean_audio,
+                "zq_down_noisy_audio": zq_down_noisy_audio,
+                "clean_audio_tensor": clean_audio_spec,
+                "noisy_audio_tensor": noisy_audio_spec,
                 "clean_sr": clean_sr,
                 "noisy_sr_default": noisy_sr_new
             }
