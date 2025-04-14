@@ -405,42 +405,60 @@ class RotaryUNet(nn.Module):
         self.apply(self._init_weights)
     
     def forward(self, x, time, cond=None):
+        if len(x.shape) == 3:
+            x = x.unsqueeze(1)
+
         # Time embedding
         t = self.time_mlp(time)
         print(t.shape)
         
         # Initial projection
         if cond is not None:
-            assert x.shape[2] == cond.shape[2], "Conditioning tensor must have the same length (L) as input tensor with shape (B, C, L)."
+            if len(cond.shape) == 3:
+                cond = cond.unsqueeze(1)
+                
+            assert cond.shape[1] == x.shape[1], "Condition tensor must have the same number of channels (C) as input tensor."
             x = torch.cat([x, cond], dim=1)
-            assert x.shape[1] == self.in_channels, "Input tensor must have the same number of channels (C) as in_channels."
 
         x = self.init_conv(x)
+        print(f"Initial Conv: {x.shape}")
         
         # Store skip connections
         skips = [x]
         
         # Down path
-        for block in self.down_blocks:
+        print(f"Down path:")
+        for i, block in enumerate(self.down_blocks):
             x = block(x, t)
+            print(f"Layer {i+1}: {x.shape}")
             skips.append(x)
             
         
         # Middle block (R-A-R)
         x = self.mid_block1(x, t)
-        x = self.mid_attn(x)
         x = self.mid_block2(x, t)
+        x = self.mid_attn(x)
+        print(f"Middle block: {x.shape}")
 
         # Up path with skip connections
-        for block in self.up_blocks:
+        print(f"Up path:")
+        for i, block in enumerate(self.up_blocks):
             skip_x = skips.pop()
             x = block(x, skip_x, t)
+            print(f"Layer {i+1}: {x.shape}") 
 
         # Final processing
         x = torch.cat([x, skips.pop()], dim=1)
         x = self.final_conv(x)
+        print(f"Final Conv: {x.shape}")
         
-        return x
+        return x.squeeze(1) if len(x.shape) == 4 else x
+
+    def _init_weights(self, m):
+        if isinstance(m, (nn.Conv2d, nn.Linear)):
+            torch.nn.init.xavier_uniform_(m.weight)
+            if hasattr(m, 'bias') and m.bias is not None:
+                torch.nn.init.zeros_(m.bias)
 
     def _init_weights(self, m):
         if isinstance(m, (nn.Conv2d, nn.Linear)):
