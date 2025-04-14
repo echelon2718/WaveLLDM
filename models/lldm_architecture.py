@@ -7,7 +7,7 @@ from inspect import isfunction
 from torch.optim import AdamW, Adam
 import os
 
-from models.unet import create_diffusion_model
+from models.unet2d import create_diffusion_model
 from training.scheduler import linear_warmup_cosine_decay
 from torch.optim.lr_scheduler import LambdaLR
 
