@@ -56,10 +56,6 @@ class WaveLLDMTrainer:
         self.epochs_run = 0
         self.lr = lr
 
-        if snapshot_path is not None:
-            print("Loading snapshot...")
-            self._load_snapshot(snapshot_path)
-
         if optimizer == "adamw":
             self.optimizer = AdamW(filter(lambda p: p.requires_grad, self.model.parameters()), lr=lr)
         elif optimizer == "adam":
@@ -68,6 +64,10 @@ class WaveLLDMTrainer:
             self.optimizer = SGD(filter(lambda p: p.requires_grad, self.model.parameters()), lr=lr, momentum=0.9)
         else:
             raise ValueError(f"Unknown optimizer: {optimizer}")
+
+        if snapshot_path is not None:
+            print("Loading snapshot...")
+            self._load_snapshot(snapshot_path)
 
         self.model = DDP(self.model, device_ids=[self.local_rank], find_unused_parameters=True)
         self.use_lr_scheduler = use_lr_scheduler
