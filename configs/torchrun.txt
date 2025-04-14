@@ -1,1 +1,49 @@
+SKRIP UNTUK TRAINING DDP:
 torchrun --nnodes=3 --nproc-per-node=1 --rdzv_id=12345 --rdzv-backend=c10d --rdzv-endpoint=192.168.1.11:29400 ./train_wavelldm.py --clean_data_path ./data/voicebank_demand_56spk/clean_speech_audios/train/ --noisy_data_path ./data/voicebank_demand_56spk/noisy_speech_audios/train/ --max_cuts 7 --cut_duration 0.45 --batch_size 64 --epochs 1000 --num_workers 8
+
+Catatan: Jangan lupa jalankan ini dulu:
+
+1. Jalankan :
+NODE 1:
+nmcli con mod "Wired connection 1" ipv4.addresses 192.168.1.10/24 ipv4.method manual
+nmcli con up "Wired connection 1"
+
+NODE 2:
+nmcli con mod "Wired connection 1" ipv4.addresses 192.168.1.11/24 ipv4.method manual
+nmcli con up "Wired connection 1"
+
+NODE 3:
+nmcli con mod "Wired connection 1" ipv4.addresses 192.168.1.12/24 ipv4.method manual
+nmcli con up "Wired connection 1"
+
+NODE 4:
+nmcli con mod "Wired connection 1" ipv4.addresses 192.168.1.13/24 ipv4.method manual
+nmcli con up "Wired connection 1"
+
+2. Pastikan hostnamectl sudah memuat nama dan IP address dari masing-masing node:
+
+sudo nano /etc/hosts
+
+Pastikan isinya:
+127.0.0.1 localhost
+127.0.1.1 master-node (WARNING: sesuaikan tempat nodenya, kalau di master beri nama ini, kalau di worker, sesuaikan misal worker-node-1)
+
+192.168.1.10 master-node
+192.168.1.11 worker-node-1
+192.168.1.12 worker-node-2
+192.168.1.13 worker-node-3
+
+# The following lines are desirable for IPv6 capable hosts
+::1     ip6-localhost ip6-loopback
+fe00::0 ip6-localnet
+ff00::0 ip6-mcastprefix
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+
+
+3. Beri izin firewall: sudo ufw allow 29500/tcp, atau matikan saja sudo ufw disable
+
+4. Pada setiap node, selalu jalankan ini sebelum mulai skrip:
+export NCCL_SOCKET_IFNAME=enp0s31f6 (cari pada skrip: ip addr)
+export NCCL_DEBUG=INFO
+export NCCL_IB_DISABLE=1
