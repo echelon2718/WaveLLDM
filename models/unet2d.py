@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
+import math
 import torch.nn.functional as F
 from timm.models.layers import DropPath
+from models.unet import RMSNorm
 from typing import Tuple
 
 # Fungsi-fungsi rotary embedding seperti yang diberikan
@@ -410,7 +412,7 @@ class RotaryUNet(nn.Module):
 
         # Time embedding
         t = self.time_mlp(time)
-        print(t.shape)
+        # print(t.shape)
         
         # Initial projection
         if cond is not None:
@@ -421,16 +423,16 @@ class RotaryUNet(nn.Module):
             x = torch.cat([x, cond], dim=1)
 
         x = self.init_conv(x)
-        print(f"Initial Conv: {x.shape}")
+        # print(f"Initial Conv: {x.shape}")
         
         # Store skip connections
         skips = [x]
         
         # Down path
-        print(f"Down path:")
+        # print(f"Down path:")
         for i, block in enumerate(self.down_blocks):
             x = block(x, t)
-            print(f"Layer {i+1}: {x.shape}")
+            # print(f"Layer {i+1}: {x.shape}")
             skips.append(x)
             
         
@@ -438,19 +440,19 @@ class RotaryUNet(nn.Module):
         x = self.mid_block1(x, t)
         x = self.mid_block2(x, t)
         x = self.mid_attn(x)
-        print(f"Middle block: {x.shape}")
+        # print(f"Middle block: {x.shape}")
 
         # Up path with skip connections
-        print(f"Up path:")
+        # print(f"Up path:")
         for i, block in enumerate(self.up_blocks):
             skip_x = skips.pop()
             x = block(x, skip_x, t)
-            print(f"Layer {i+1}: {x.shape}") 
+            # print(f"Layer {i+1}: {x.shape}") 
 
         # Final processing
         x = torch.cat([x, skips.pop()], dim=1)
         x = self.final_conv(x)
-        print(f"Final Conv: {x.shape}")
+        # print(f"Final Conv: {x.shape}")
         
         return x.squeeze(1) if len(x.shape) == 4 else x
 
