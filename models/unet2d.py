@@ -60,6 +60,7 @@ class SinusoidalTimeEmbedding(nn.Module):
         embeddings = torch.exp(torch.arange(half_dim, device=x.device) * -embeddings)
         embeddings = x[:, None] * embeddings[None, :]
         embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
+        return embeddings
 
 class LayerNorm2D(nn.Module):
     """ LayerNorm that supports two data formats: channels_last (default) or channels_first. 
@@ -288,7 +289,7 @@ class DownBlock(nn.Module):
         self.downsample = Downsample(in_channels, out_channels, with_conv=True)
 
         if use_attn:
-            self.attn = RotaryLinearAttention(in_channels, n_heads=32, n_kv_heads=32)
+            self.attn = RotaryLinearAttention(in_channels, n_heads=16, n_kv_heads=16)
         else:
             self.attn = None
     
@@ -336,7 +337,7 @@ class UpBlock(nn.Module):
         self.upsample = Upsample(in_channels, out_channels, with_conv=True)
         
         if use_attn:
-            self.attn = RotaryLinearAttention(in_channels, n_heads=32, n_kv_heads=32)
+            self.attn = RotaryLinearAttention(in_channels, n_heads=16, n_kv_heads=16)
         else:
             self.attn = None
 
@@ -362,7 +363,7 @@ class RotaryUNet(nn.Module):
         model_channels=64,
         out_channels=4,
         time_dim=None,
-        num_levels=4    
+        num_levels=4
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -389,7 +390,7 @@ class RotaryUNet(nn.Module):
         # self.mid_block1 = ResBlock1(ch*8, dilation=(1,))
         self.mid_block1 = ConvNeXtV2Block(ch*8, time_embedding_dim=time_dim)
         self.mid_block2 = ConvNeXtV2Block(ch*8, time_embedding_dim=time_dim)
-        self.mid_attn = RotaryLinearAttention(ch*8, n_heads=32, n_kv_heads=32)
+        self.mid_attn = RotaryLinearAttention(ch*8, n_heads=16, n_kv_heads=16)
 
         # Up blocks - decreasing channel dimensions
         self.up_blocks = nn.ModuleList()
@@ -474,9 +475,9 @@ Prototype: To use diffusion model, you can run this function
 
 def create_diffusion_model(
     in_channels=1,
-    base_channels=64,
+    base_channels=32,
     out_channels=1,
-    time_dim=64
+    time_dim=32
 ):
     """
     Creates a diffusion model with the specified configuration
