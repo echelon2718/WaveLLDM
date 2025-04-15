@@ -436,23 +436,11 @@ class WaveLLDM(DDPM):
             raise NotImplementedError(f"Parameterization {self.parameterization} not supported")
         
         # Compute loss
-        # loss = self.get_loss(model_out, target, mean=False).mean(dim=[1, 2])
         loss = self.get_loss(model_out, target, mean=True)
         log_prefix = 'train' if self.training else 'val'
-        
-        # # Update loss dictionary
-        # loss_dict.update({f'{log_prefix}/loss_simple': loss.mean()})
-        # loss_simple = loss.mean() * self.l_simple_weight
-        # Versi diubah
-        loss_dict.update({f'{log_prefix}/loss_simple': loss})
-        loss_simple = loss * self.l_simple_weight
 
-        # loss_vlb = (self.lvlb_weights[t] * loss).mean()
-        # loss_dict.update({f'{log_prefix}/loss_vlb': loss_vlb})
-        # loss = loss_simple + self.original_elbo_weight * loss_vlb
-        # loss_dict.update({f'{log_prefix}/loss': loss})
-        loss = loss_simple
-        
+        loss_dict.update({f'{log_prefix}/loss_simple': loss})
+        loss = loss * self.l_simple_weight
         return loss, loss_dict
     
     @torch.no_grad()
