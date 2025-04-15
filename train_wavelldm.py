@@ -92,9 +92,9 @@ def train(args):
 
     unet = create_diffusion_model(
         in_channels=2,
-        base_channels=64,
+        base_channels=32,
         out_channels=1,
-        time_dim=64
+        time_dim=32
     ).to(device)
 
     # Load pretrained weights and set to evaluation mode
