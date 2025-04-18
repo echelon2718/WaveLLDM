@@ -72,8 +72,20 @@ class WaveLLDMTrainer:
         self.model = DDP(self.model, device_ids=[self.local_rank], find_unused_parameters=True)
         self.use_lr_scheduler = use_lr_scheduler
 
+        # Scheduler: define total training steps and warmup
+        self.use_lr_scheduler = use_lr_scheduler
         if use_lr_scheduler:
-            self.scheduler = LambdaLR(self.optimizer, lr_lambda=linear_warmup_cosine_decay())
+            total_steps = epochs * len(train_dataloader)
+            warmup_steps = int(0.1 * total_steps)
+            # LambdaLR expects a function mapping current step to a multiplier
+            lr_lambda = linear_warmup_cosine_decay(
+                total_steps=total_steps,
+                warmup_steps=warmup_steps,
+            )
+            # step() must be called per batch
+            self.scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
+        else:
+            self.scheduler = None
 
         os.makedirs(self.save_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
@@ -187,9 +199,6 @@ class WaveLLDMTrainer:
             if self.val_dataloader is not None:
                 val_loss = self.validate(epoch, self.val_dataloader, self.writer)
                 print(f"[GPU-{self.global_rank}] Epoch {epoch+1}/{self.epochs}, Average Val Loss: {val_loss:.4f}")
-
-            if self.scheduler is not None:
-                self.scheduler.step()
 
             if self.local_rank == 0 and (epoch + 1) % self.save_every == 0:
                 checkpoint_path = os.path.join(self.save_dir, f"checkpoint_epoch_{epoch+1}.pth")
