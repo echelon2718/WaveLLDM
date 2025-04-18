@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument("--clean_data_path", type=str, required=True, help="Path to clean audio dataset")
     parser.add_argument("--noisy_data_path", type=str, required=True, help="Path to noisy audio dataset")
     parser.add_argument("--add_random_cutting", type=bool, default=True, help="Choose whether random cutting is used or not")
-    parser.add_argument("--max_cuts", type=int, default=10, help="Define maximum count of random cuts")
+    parser.add_argument("--max_cuts", type=int, default=4, help="Define maximum count of random cuts")
     parser.add_argument("--cut_duration", type=float, default=0.35, help="Define cut duration for every random cut")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
     parser.add_argument("--val_batch_size", type=int, default=4, help="Batch size for validation")
@@ -153,6 +153,7 @@ def train(args):
         args.noisy_data_path,
         args.add_random_cutting,
         stage=3,
+        fixed_length=229376,
         spec_trans=spec_trans_cpu,
         encoder=encoder_cpu,
         quantizer=quantizer_cpu,
@@ -164,6 +165,7 @@ def train(args):
         args.noisy_data_path.replace("train", "test"),
         args.add_random_cutting,
         stage=3,
+        fixed_length=229376,
         spec_trans=spec_trans_cpu,
         encoder=encoder_cpu,
         quantizer=quantizer_cpu,
@@ -217,7 +219,7 @@ def train(args):
         use_lr_scheduler=args.use_lr_scheduler,
         save_dir="./checkpoints",
         log_dir="./logs/wavelldm",
-        save_every=5,
+        save_every=1,
         snapshot_path=args.snapshot_path
     )
 
