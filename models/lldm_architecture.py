@@ -159,7 +159,6 @@ class DDPM(nn.Module):
         self.log_every = log_every
         self.ema_decay = ema_decay
         
-        
         self.l_simple_weight = l_simple_weight
         self.conditioning_key = conditioning_key
         self.learn_logvar = learn_logvar
