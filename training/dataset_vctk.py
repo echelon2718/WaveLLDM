@@ -39,6 +39,20 @@ def random_cut(audio, max_cuts=5, cut_duration=0.1, sample_rate=16000):
     # return audio
     return audio * mask
 
+def segment_5seconds(audio):
+    """
+    Membuat audio punya panjang yang uniform sesuai max_duration.
+    """
+    audio_length = audio.shape[-1]
+    max_audio_sample = 229376
+
+    if audio_length > max_audio_sample:
+        start = np.random.randint(0, audio_length - max_audio_sample + 1)
+        end = start + max_audio_sample
+        audio = audio[..., start:end]
+    
+    return audio
+
 def collate_fn_latents(batch):
     # Extract and preprocess clean and noisy tensors from the batch
     zq_down_clean = [item['zq_down_clean_audio'].squeeze(0).permute(1, 0) for item in batch]  # Shape: [seq_len, 512]
