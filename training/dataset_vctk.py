@@ -39,20 +39,6 @@ def random_cut(audio, max_cuts=5, cut_duration=0.1, sample_rate=16000):
     # return audio
     return audio * mask
 
-def segment_5seconds(audio):
-    """
-    Membuat audio punya panjang yang uniform sesuai max_duration.
-    """
-    audio_length = audio.shape[-1]
-    max_audio_sample = 229376
-
-    if audio_length > max_audio_sample:
-        start = np.random.randint(0, audio_length - max_audio_sample + 1)
-        end = start + max_audio_sample
-        audio = audio[..., start:end]
-    
-    return audio
-
 def collate_fn_latents(batch):
     # Extract and preprocess clean and noisy tensors from the batch
     zq_down_clean = [item['zq_down_clean_audio'].squeeze(0).permute(1, 0) for item in batch]  # Shape: [seq_len, 512]
@@ -99,7 +85,7 @@ class DenoiserDataset(Dataset):
         noisy_dir: str,
         add_random_cutting: bool = False,
         stage: int = 1,
-        max_cuts: int = 10,
+        max_cuts: int = 5,
         cut_duration: float = 0.35,
         fixed_length: int = None,  # Baru: panjang sampel tetap (dalam jumlah sample)
         spec_trans = None,
@@ -122,12 +108,25 @@ class DenoiserDataset(Dataset):
         self.device = device
     
     def __getitem__(self, idx):
+        # Load audio clean
+        # clean_audio, clean_sr = librosa.load(os.path.join(self.clean_dir, self.clean_files[idx]), sr=44100)
         clean_audio, clean_sr = torchaudio.load(os.path.join(self.clean_dir, self.clean_files[idx]))
         clean_audio = clean_audio.unsqueeze(0)
+
+        # Pilih sample rate acak untuk audio noisy agar bervariasi, lalu resample ke clean_sr
+        # noisy_sr = int(clean_sr / (np.random.randint(1, 3) + 1))
+        # noisy_audio, noisy_sr = librosa.load(os.path.join(self.noisy_dir, self.noisy_files[idx]), sr=noisy_sr)
+        # noisy_audio = librosa.resample(noisy_audio, orig_sr=noisy_sr, target_sr=clean_sr)
+        # noisy_sr_new = clean_sr
         noisy_sr = int(clean_sr / (torch.randint(1, 3, (1,)).item() + 1))
         noisy_audio, orig_noisy_sr = torchaudio.load(os.path.join(self.noisy_dir, self.noisy_files[idx]))
         noisy_audio = noisy_audio.unsqueeze(0)
 
+        # Ubah ke tensor dan tambahkan dimensi channel
+        # clean_audio = torch.tensor(clean_audio).unsqueeze(0)
+        # noisy_audio = torch.tensor(noisy_audio).unsqueeze(0)
+
+        # Resample noisy audio ke clean_sr [BARU]
         if orig_noisy_sr != noisy_sr:
             resampler = Resample(orig_freq=orig_noisy_sr, new_freq=noisy_sr)
             noisy_audio = resampler(noisy_audio)
@@ -140,6 +139,7 @@ class DenoiserDataset(Dataset):
         if self.add_random_cutting:
             noisy_audio = random_cut(noisy_audio, max_cuts=self.max_cuts, cut_duration=self.cut_duration, sample_rate=clean_sr)
 
+        ################### MODIFIKASI #######################
         if self.fixed_length is not None:
             audio_length = clean_audio.size(-1)
             if audio_length > self.fixed_length:
@@ -153,6 +153,8 @@ class DenoiserDataset(Dataset):
                 pad_amount = self.fixed_length - audio_length
                 clean_audio = F.pad(clean_audio, (0, pad_amount))
                 noisy_audio = F.pad(noisy_audio, (0, pad_amount))
+
+        #######################################################
 
         if self.encoder is not None and self.quantizer is not None:
             clean_audio_spec = self.spec_trans(clean_audio.to("cpu"))
