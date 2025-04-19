@@ -91,10 +91,11 @@ def train(args):
     ).to(device)
 
     unet = create_diffusion_model(
-        in_channels=2,
+        in_channels=1,
         base_channels=32,
         out_channels=1,
-        time_dim=32
+        time_dim=32,
+        use_film=True
     ).to(device)
 
     # Load pretrained weights and set to evaluation mode
@@ -153,6 +154,7 @@ def train(args):
         args.noisy_data_path,
         args.add_random_cutting,
         stage=3,
+        max_cuts=args.max_cuts,
         fixed_length=229376,
         spec_trans=spec_trans_cpu,
         encoder=encoder_cpu,
@@ -165,6 +167,7 @@ def train(args):
         args.noisy_data_path.replace("train", "test"),
         args.add_random_cutting,
         stage=3,
+        max_cuts=args.max_cuts,
         fixed_length=229376,
         spec_trans=spec_trans_cpu,
         encoder=encoder_cpu,
