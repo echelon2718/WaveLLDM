@@ -81,7 +81,7 @@ class DDPM(nn.Module):
         parameterization: str = "eps", # parametrisasi untuk noise (eps atau x0)
         learn_logvar: bool = False,
         logvar_init: float = 0.0,
-        recon_loss_weight: float = 0.0,
+        recon_loss_weight: float = 0.1,
         device: int = int(os.environ["LOCAL_RANK"]), # perangkat untuk model (CPU atau GPU)
     ):
         super().__init__()
@@ -475,7 +475,7 @@ class WaveLLDM(DDPM):
             ground_truth_audio_arr = ground_truth_audio_arr[:, :, :recon_audio.shape[-1]]
 
         
-        spectogram_loss = melspec_loss(recon_audio, ground_truth_audio_arr) + stft_loss(recon_audio, ground_truth_audio_arr)
+        spectogram_loss = melspec_loss(recon_audio, ground_truth_audio_arr, device=recon_audio.device) + stft_loss(recon_audio, ground_truth_audio_arr, device=recon_audio.device)
 
         return recon_loss, spectogram_loss
 
@@ -569,5 +569,5 @@ class WaveLLDM(DDPM):
         t = torch.randint(0, self.num_timesteps, (clean_latents.shape[0],), device=self.device).long()
         
         # Compute loss using p_losses, conditioned on degraded_latents
-        loss, loss_dict = self.p_losses(clean_latents, t, degraded_latents, add_recon_loss=False, gt_batch=batch)
-        return loss, loss_dict, t # Tambahin t buat dipake spectral loss
+        loss, loss_dict = self.p_losses(clean_latents, t, degraded_latents, add_recon_loss=True, gt_batch=batch)
+        return loss, loss_dict 
