@@ -115,10 +115,12 @@ class DenoiserDataset(Dataset):
                 offset = random.randint(0, audio_len - self.fixed_length)
                 clean_audio = clean_audio[..., offset:offset + self.fixed_length]
                 noisy_audio = noisy_audio[..., offset:offset + self.fixed_length]
+                noisy_audio = noisy_audio[..., :clean_audio.size(-1)]
             else:
                 pad_amount = self.fixed_length - audio_len
                 clean_audio = F.pad(clean_audio, (0, pad_amount))
                 noisy_audio = F.pad(noisy_audio, (0, pad_amount))
+                noisy_audio = noisy_audio[..., :clean_audio.size(-1)]
 
         if self.encoder and self.quantizer:
             clean_spec = self.spec_trans(clean_audio.to("cpu"))
