@@ -1,7 +1,5 @@
 import os
-import librosa
-from torch.utils.data import Dataset, DataLoader
-from models.utils import LogMelSpectrogram, count_parameters, get_padding_sample
+from torch.utils.data import Dataset
 import torch
 import random
 import numpy as np
@@ -26,10 +24,6 @@ def random_cut(audio, max_cuts=5, cut_duration=0.1, sample_rate=16000):
     """
     audio_length = audio.shape[-1]
     cut_samples = int(cut_duration * sample_rate)
-    # num_cuts = random.randint(1, max_cuts)  # Pilih jumlah cut secara acak antara 1 hingga max_cuts
-    # for _ in range(num_cuts):
-    #     start = random.randint(0, audio_length - cut_samples)
-    #     audio[:, start:start + cut_samples] = 0
 
     num_cuts = torch.randint(1, max_cuts + 1, (1,)).item()
     starts = torch.randint(0, audio_length - cut_samples + 1, (num_cuts,))
@@ -40,38 +34,22 @@ def random_cut(audio, max_cuts=5, cut_duration=0.1, sample_rate=16000):
     return audio * mask
 
 def collate_fn_latents(batch):
-    # Extract and preprocess clean and noisy tensors from the batch
-    clean_audio = torch.stack([item["clean_audio"] for item in batch], dim=0)
-    noisy_audio = torch.stack([item["noisy_audio"] for item in batch], dim=0)
+    clean_audio = torch.stack([item["clean_audio"][0] for item in batch])
+    noisy_audio = torch.stack([item["noisy_audio"][0] for item in batch])
 
-    zq_down_clean = [item['zq_down_clean_audio'].squeeze(0).permute(1, 0) for item in batch]  # Shape: [seq_len, 512]
-    zq_down_noisy = [item['zq_down_noisy_audio'].squeeze(0).permute(1, 0) for item in batch]  # Shape: [seq_len, 512]
-    melspec_lengths = [item['clean_audio_tensor'].shape[-1] for item in batch]  # Shape: [batch_size, 512, seq_len]
+    zq_down_clean = [item['zq_down_clean_audio'].squeeze(0).permute(1, 0) for item in batch]
+    zq_down_noisy = [item['zq_down_noisy_audio'].squeeze(0).permute(1, 0) for item in batch]
+    melspec_lengths = [item['clean_audio_tensor'].shape[-1] for item in batch]
 
-    # Get the sequence lengths of all items in the batch
     lengths = torch.tensor([t.shape[0] for t in zq_down_clean])
+    max_length = math.ceil(max(lengths) / 16) * 16
 
-    # Find the maximum sequence length in the batch
-    max_length = max(lengths)
+    def pad_to_max(seq):
+        return F.pad(seq, (0, 0, 0, max_length - seq.shape[0]), value=0)
 
-    # Round up to the nearest multiple of 16
-    padded_length = math.ceil(max_length / 16) * 16
+    clean_padded = torch.stack([pad_to_max(t) for t in zq_down_clean]).permute(0, 2, 1)
+    noisy_padded = torch.stack([pad_to_max(t) for t in zq_down_noisy]).permute(0, 2, 1)
 
-    # Manually pad each sequence to the padded_length
-    clean_padded = torch.stack([
-        torch.nn.functional.pad(t, (0, 0, 0, padded_length - t.shape[0]), "constant", 0)
-        for t in zq_down_clean
-    ])
-    noisy_padded = torch.stack([
-        torch.nn.functional.pad(t, (0, 0, 0, padded_length - t.shape[0]), "constant", 0)
-        for t in zq_down_noisy
-    ])
-
-    # Adjust dimensions to [batch_size, 512, padded_length]
-    clean_padded = clean_padded.permute(0, 2, 1)
-    noisy_padded = noisy_padded.permute(0, 2, 1)
-
-    # Return the padded tensors and additional metadata
     return {
         "clean_audio": clean_audio,
         "noisy_audio": noisy_audio,
@@ -113,85 +91,71 @@ class DenoiserDataset(Dataset):
         self.device = device
     
     def __getitem__(self, idx):
-        clean_audio, clean_sr = torchaudio.load(os.path.join(self.clean_dir, self.clean_files[idx]))
+        clean_path = os.path.join(self.clean_dir, self.clean_files[idx])
+        noisy_path = os.path.join(self.noisy_dir, self.noisy_files[idx])
+
+        clean_audio, clean_sr = torchaudio.load(clean_path)
         clean_audio = clean_audio.unsqueeze(0)
+
         noisy_sr = int(clean_sr / (torch.randint(1, 3, (1,)).item() + 1))
-        noisy_audio, orig_noisy_sr = torchaudio.load(os.path.join(self.noisy_dir, self.noisy_files[idx]))
+        noisy_audio, orig_noisy_sr = torchaudio.load(noisy_path)
         noisy_audio = noisy_audio.unsqueeze(0)
 
-        # Resample noisy audio ke clean_sr [BARU]
         if orig_noisy_sr != noisy_sr:
-            resampler = Resample(orig_freq=orig_noisy_sr, new_freq=noisy_sr)
-            noisy_audio = resampler(noisy_audio)
+            noisy_audio = Resample(orig_freq=orig_noisy_sr, new_freq=noisy_sr)(noisy_audio)
         if noisy_sr != clean_sr:
-            resampler = Resample(orig_freq=noisy_sr, new_freq=clean_sr)
-            noisy_audio = resampler(noisy_audio)
-        noisy_sr_new = clean_sr
+            noisy_audio = Resample(orig_freq=noisy_sr, new_freq=clean_sr)(noisy_audio)
 
-        # Tambah random cut jika diaktifkan
         if self.add_random_cutting:
             noisy_audio = random_cut(noisy_audio, max_cuts=self.max_cuts, cut_duration=self.cut_duration, sample_rate=clean_sr)
 
-        ################### MODIFIKASI #######################
         if self.fixed_length is not None:
-            audio_length = clean_audio.size(-1)
-            if audio_length > self.fixed_length:
-                # Crop secara acak
-                max_offset = audio_length - self.fixed_length
-                offset = torch.randint(0, max_offset + 1, (1,)).item()
+            audio_len = clean_audio.size(-1)
+            if audio_len > self.fixed_length:
+                offset = random.randint(0, audio_len - self.fixed_length)
                 clean_audio = clean_audio[..., offset:offset + self.fixed_length]
                 noisy_audio = noisy_audio[..., offset:offset + self.fixed_length]
             else:
-                # Pad dengan nol
-                pad_amount = self.fixed_length - audio_length
+                pad_amount = self.fixed_length - audio_len
                 clean_audio = F.pad(clean_audio, (0, pad_amount))
                 noisy_audio = F.pad(noisy_audio, (0, pad_amount))
 
-        #######################################################
-
-        if self.encoder is not None and self.quantizer is not None:
-            clean_audio_spec = self.spec_trans(clean_audio.to("cpu"))
-            noisy_audio_spec = self.spec_trans(noisy_audio.to("cpu"))
+        if self.encoder and self.quantizer:
+            clean_spec = self.spec_trans(clean_audio.to("cpu"))
+            noisy_spec = self.spec_trans(noisy_audio.to("cpu"))
 
             with torch.no_grad():
                 self.encoder.eval()
                 self.quantizer.eval()
+                self.encoder.to("cpu")
+                self.quantizer.to("cpu")
 
-                self.encoder = self.encoder.to("cpu")
-                self.quantizer = self.quantizer.to("cpu")
+                latent_clean = self.encoder(clean_spec)
+                latent_noisy = self.encoder(noisy_spec)
 
-                # Encode audio ke latent space
-                clean_audio_latent = self.encoder(clean_audio_spec.to("cpu"))          
-                noisy_audio_latent = self.encoder(noisy_audio_spec.to("cpu"))
+                zq_down_clean = self.quantizer(latent_clean).latents
+                zq_down_noisy = self.quantizer(latent_noisy).latents
 
-                # Quantize latent audio
-                zq_down_clean_audio = self.quantizer(clean_audio_latent).latents
-                zq_down_noisy_audio = self.quantizer(noisy_audio_latent).latents
-
-            item = {
+            return {
                 "clean_audio": clean_audio,
                 "noisy_audio": noisy_audio,
-
-                "zq_down_clean_audio": zq_down_clean_audio,
-                "zq_down_noisy_audio": zq_down_noisy_audio,
-
-                "clean_audio_tensor": clean_audio_spec,
-                "noisy_audio_tensor": noisy_audio_spec,
-
+                "zq_down_clean_audio": zq_down_clean,
+                "zq_down_noisy_audio": zq_down_noisy,
+                "clean_audio_tensor": clean_spec,
+                "noisy_audio_tensor": noisy_spec,
                 "clean_sr": clean_sr,
-                "noisy_sr_default": noisy_sr_new
+                "noisy_sr_default": clean_sr
             }
 
-            return item
+        clean_tensor = self.spec_trans(clean_audio.to(self.device)) if self.spec_trans else clean_audio.to(self.device)
+        noisy_tensor = self.spec_trans(noisy_audio.to(self.device)) if self.spec_trans else noisy_audio.to(self.device)
 
-        item = {
-            "clean_audio_tensor": clean_audio.to(self.device) if self.spec_trans is None else self.spec_trans(clean_audio.to(self.device)),
-            "noisy_audio_tensor": noisy_audio.to(self.device) if self.spec_trans is None else self.spec_trans(noisy_audio.to(self.device)),
+        return {
+            "clean_audio_tensor": clean_tensor,
+            "noisy_audio_tensor": noisy_tensor,
             "clean_sr": clean_sr,
-            "noisy_sr_default": noisy_sr_new
-        }
-        
-        return item       
+            "noisy_sr_default": clean_sr
+        }     
 
     def __len__(self):
         return len(self.clean_files)
