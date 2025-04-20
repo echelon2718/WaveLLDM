@@ -432,7 +432,7 @@ class WaveLLDM(DDPM):
             noise_pred (Tensor): Noise yang diprediksi oleh model (ε_θ), 
                 berbentuk (B, n_emb, L).
             t (Tensor): Timestep untuk forward diffusion, berbentuk (B,).
-            gt_batch (Tensor): Ground truth audio dalam batch.
+            gt_batch (Tensor): Ground truth audio dalam batch. 
             melspec_loss (function): Fungsi loss untuk mel spectrogram.
             stft_loss (function): Fungsi loss untuk short-time Fourier transform.
 
@@ -469,6 +469,10 @@ class WaveLLDM(DDPM):
 
         with torch.no_grad():
             recon_audio = self.decode(recon_audio_upsampled_latents) # Antara (B, 1, N_Sample) atau (B, N_Sample)... perlu dipastikan lagi
+        
+        # Pastikan panjang recon_audio dan ground_truth_audio_arr sama
+        if recon_audio.shape[-1] != ground_truth_audio_arr.shape[-1]:
+            ground_truth_audio_arr = ground_truth_audio_arr[:, :, :recon_audio.shape[-1]]
 
         
         spectogram_loss = melspec_loss(recon_audio, ground_truth_audio_arr) + stft_loss(recon_audio, ground_truth_audio_arr)
