@@ -155,6 +155,108 @@ class ConvNeXtV2Block(nn.Module):
         x = input + self.drop_path(x)
         return x
 
+class LinearAttention(nn.Module):
+    def __init__(
+        self,
+        dim: int = 512,
+        n_heads: int = 8,
+        n_kv_heads: int = 4,
+        use_rmsnorm: bool = True,
+        device: str = None,
+    ):
+        """
+        Vanilla linear attention module (no rotary embeddings).
+
+        Parameters:
+          - dim         : feature dimension (e.g., embedding dim)
+          - n_heads     : number of query heads
+          - n_kv_heads  : number of key/value heads (will be replicated to match n_heads)
+          - use_rmsnorm : whether to apply RMSNorm before projections
+          - device      : torch device (defaults to current CUDA if available)
+        """
+        super().__init__()
+        self.dim = dim
+        self.n_heads = n_heads
+        self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
+        self.head_dim = dim // n_heads
+        assert self.head_dim > 0, "dim must be divisible by n_heads"
+        self.n_rep = n_heads // self.n_kv_heads
+        self.norm = RMSNorm(dim) if use_rmsnorm else nn.GroupNorm(32, dim)
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+        # projections
+        self.wq = nn.Linear(dim, n_heads * self.head_dim, bias=False, device=self.device)
+        self.wk = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False, device=self.device)
+        self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False, device=self.device)
+        self.wo = nn.Linear(n_heads * self.head_dim, dim, bias=False, device=self.device)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        is_image = False
+        if x.ndim == 4:
+            is_image = True
+            B, C, H, W = x.shape
+            # expect C == dim
+            x = x.flatten(2).transpose(1, 2)  # (B, H*W, dim)
+
+        B, seq_len, _ = x.shape
+        if self.norm is not None:
+            x = self.norm(x)
+
+        # query, key, value projections
+        q = self.wq(x).view(B, seq_len, self.n_heads, self.head_dim)
+        k = self.wk(x).view(B, seq_len, self.n_kv_heads, self.head_dim)
+        v = self.wv(x).view(B, seq_len, self.n_kv_heads, self.head_dim)
+
+        # optionally scale
+        scale = 1.0 / math.sqrt(self.head_dim)
+        q = q * scale
+        k = k * scale
+
+        # replicate keys/values to match query heads
+        if self.n_rep > 1:
+            k = k[:, :, :, None, :].expand(B, seq_len, self.n_kv_heads, self.n_rep, self.head_dim)
+            k = k.reshape(B, seq_len, self.n_heads, self.head_dim)
+            v = v[:, :, :, None, :].expand(B, seq_len, self.n_kv_heads, self.n_rep, self.head_dim)
+            v = v.reshape(B, seq_len, self.n_heads, self.head_dim)
+        else:
+            k = k.expand(B, seq_len, self.n_heads, self.head_dim)
+            v = v.expand(B, seq_len, self.n_heads, self.head_dim)
+
+        # move head dimension
+        q = q.transpose(1, 2)      # (B, heads, seq, head_dim)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        # # stabilization (optional)
+        # q = q - q.max(dim=-1, keepdim=True)[0]
+        # k = k - k.max(dim=-1, keepdim=True)[0]
+
+        # kernel φ(x) = elu(x) + 1
+        phi = lambda x: F.elu(x).clamp(min=-0.99) + 1
+        Q_lin = phi(q)
+        K_lin = phi(k)
+
+        # compute KV and normalizer
+        # KV: sum_s K_lin(s) ⊗ V(s)
+        KV = torch.einsum('b h s d, b h s d -> b h d', K_lin, v)
+        # K_sum: sum_s K_lin(s)
+        K_sum = K_lin.sum(dim=2)  # (B, heads, head_dim)
+        # normalizer: Z = <Q_lin, K_sum>
+        Z = torch.einsum('b h s d, b h d -> b h s', Q_lin, K_sum).unsqueeze(-1)
+
+        # attention output
+        Y = torch.einsum('b h s d, b h d -> b h s d', Q_lin, KV)
+        eps = 1e-6
+        Y = Y / (Z + eps)
+
+        # merge heads
+        Y = Y.transpose(1, 2).contiguous().view(B, seq_len, self.n_heads * self.head_dim)
+        out = self.wo(Y)
+
+        if is_image:
+            out = out.transpose(1, 2).view(B, self.dim, H, W)
+        return out
+
 # Versi modifikasi Rotary Attention dengan Linear Attention untuk data gambar
 class RotaryLinearAttention(nn.Module):
     def __init__(
