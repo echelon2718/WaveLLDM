@@ -117,7 +117,7 @@ class GlobalResponseNorm(nn.Module):
         self.gamma = nn.Parameter(torch.zeros(1, 1, 1, dim)).to(device)
         self.beta = nn.Parameter(torch.zeros(1, 1, 1, dim)).to(device)
     
-    def forward(self, x, eps=1e-6):
+    def forward(self, x, eps=1e-5):
         Gx = torch.norm(x, p=2, dim=(1, 2), keepdim=True)
         Nx = Gx / (Gx.mean(dim=-1, keepdim=True) + eps)
         return self.gamma * (x * Nx) + self.beta + x
@@ -211,6 +211,109 @@ class DummyConv2D(nn.Module):
         x = self.conv(x)
         return x
 
+class LinearAttention(nn.Module):
+    def __init__(
+        self,
+        dim: int = 512,
+        n_heads: int = 8,
+        n_kv_heads: int = 4,
+        use_rmsnorm: bool = True,
+        device: str = None,
+    ):
+        """
+        Vanilla linear attention module (no rotary embeddings).
+
+        Parameters:
+          - dim         : feature dimension (e.g., embedding dim)
+          - n_heads     : number of query heads
+          - n_kv_heads  : number of key/value heads (will be replicated to match n_heads)
+          - use_rmsnorm : whether to apply RMSNorm before projections
+          - device      : torch device (defaults to current CUDA if available)
+        """
+        super().__init__()
+        self.dim = dim
+        self.n_heads = n_heads
+        self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
+        self.head_dim = dim // n_heads
+        assert self.head_dim > 0, "dim must be divisible by n_heads"
+        self.n_rep = n_heads // self.n_kv_heads
+        self.norm = RMSNorm(dim) if use_rmsnorm else nn.GroupNorm(32, dim)
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+        # projections
+        self.wq = nn.Linear(dim, n_heads * self.head_dim, bias=False, device=self.device)
+        self.wk = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False, device=self.device)
+        self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False, device=self.device)
+        self.wo = nn.Linear(n_heads * self.head_dim, dim, bias=False, device=self.device)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        is_image = False
+        if x.ndim == 4:
+            is_image = True
+            B, C, H, W = x.shape
+            # expect C == dim
+            x = x.flatten(2).transpose(1, 2)  # (B, H*W, dim)
+
+        B, seq_len, _ = x.shape
+        if self.norm is not None:
+            x = self.norm(x)
+
+        # query, key, value projections
+        q = self.wq(x).view(B, seq_len, self.n_heads, self.head_dim)
+        k = self.wk(x).view(B, seq_len, self.n_kv_heads, self.head_dim)
+        v = self.wv(x).view(B, seq_len, self.n_kv_heads, self.head_dim)
+
+        # optionally scale
+        scale = 1.0 / math.sqrt(self.head_dim)
+        q = q * scale
+        k = k * scale
+
+        # replicate keys/values to match query heads
+        if self.n_rep > 1:
+            k = k[:, :, :, None, :].expand(B, seq_len, self.n_kv_heads, self.n_rep, self.head_dim)
+            k = k.reshape(B, seq_len, self.n_heads, self.head_dim)
+            v = v[:, :, :, None, :].expand(B, seq_len, self.n_kv_heads, self.n_rep, self.head_dim)
+            v = v.reshape(B, seq_len, self.n_heads, self.head_dim)
+        else:
+            k = k.expand(B, seq_len, self.n_heads, self.head_dim)
+            v = v.expand(B, seq_len, self.n_heads, self.head_dim)
+
+        # move head dimension
+        q = q.transpose(1, 2)      # (B, heads, seq, head_dim)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        # # stabilization (optional)
+        # q = q - q.max(dim=-1, keepdim=True)[0]
+        # k = k - k.max(dim=-1, keepdim=True)[0]
+
+        # kernel φ(x) = elu(x) + 1
+        phi = lambda x: F.elu(x).clamp(min=-0.99) + 1
+        Q_lin = phi(q)
+        K_lin = phi(k)
+
+        # compute KV and normalizer
+        # KV: sum_s K_lin(s) ⊗ V(s)
+        KV = torch.einsum('b h s d, b h s d -> b h d', K_lin, v)
+        # K_sum: sum_s K_lin(s)
+        K_sum = K_lin.sum(dim=2)  # (B, heads, head_dim)
+        # normalizer: Z = <Q_lin, K_sum>
+        Z = torch.einsum('b h s d, b h d -> b h s', Q_lin, K_sum).unsqueeze(-1)
+
+        # attention output
+        Y = torch.einsum('b h s d, b h d -> b h s d', Q_lin, KV)
+        eps = 1e-6
+        Y = Y / (Z + eps)
+
+        # merge heads
+        Y = Y.transpose(1, 2).contiguous().view(B, seq_len, self.n_heads * self.head_dim)
+        out = self.wo(Y)
+
+        if is_image:
+            out = out.transpose(1, 2).view(B, self.dim, H, W)
+        return out
+
+
 # Versi modifikasi Rotary Attention dengan Linear Attention untuk data gambar
 class RotaryLinearAttention(nn.Module):
     def __init__(
@@ -221,13 +324,6 @@ class RotaryLinearAttention(nn.Module):
         use_rmsnorm: bool = True,
         device: str = "cuda" if torch.cuda.is_available() else "cpu"
     ):
-        """
-        Parameter:
-          - dim         : Dimensi fitur (misal: dim embedding)
-          - n_heads     : Jumlah head untuk query
-          - n_kv_heads  : Jumlah head untuk key & value (setelah nanti direplikasi)
-          - device      : Device yang digunakan
-        """
         super().__init__()
         self.dim = dim
         self.n_heads = n_heads
@@ -244,81 +340,54 @@ class RotaryLinearAttention(nn.Module):
         self.wo = nn.Linear(self.n_heads * self.head_dim, self.dim, bias=False, device=device)
 
     def forward(self, x):
-        """
-        x bisa berupa:
-        - tensor gambar dengan shape (B, C, H, W) → kita flatten H & W
-        - atau tensor sekuens (B, N, dim)
-        """
         is_image = False
-        if x.ndim == 4:  # Asumsi input gambar: (B, C, H, W)
+        if x.ndim == 4:
             is_image = True
             B, C, H, W = x.shape
-            # Asumsikan x sudah berupa embedding dengan C == self.dim
-            x = x.flatten(2).transpose(1, 2)  # (B, H*W, C)
+            x = x.flatten(2).transpose(1, 2)
         
         B, seq_len, _ = x.shape
 
         if self.norm is not None:
             x = self.norm(x)
 
-        # Hitung query, key, value
-        xq = self.wq(x)  # (B, seq_len, n_heads * head_dim)
-        xk = self.wk(x)  # (B, seq_len, n_kv_heads * head_dim)
-        xv = self.wv(x)  # (B, seq_len, n_kv_heads * head_dim)
+        xq = self.wq(x)
+        xk = self.wk(x)
+        xv = self.wv(x)
 
-        # Reshape ke multi-head
-        xq = xq.view(B, seq_len, self.n_heads, self.head_dim)         # (B, seq_len, n_heads, head_dim)
-        xk = xk.view(B, seq_len, self.n_kv_heads, self.head_dim)         # (B, seq_len, n_kv_heads, head_dim)
-        xv = xv.view(B, seq_len, self.n_kv_heads, self.head_dim)         # (B, seq_len, n_kv_heads, head_dim)
+        xq = xq.view(B, seq_len, self.n_heads, self.head_dim)
+        xk = xk.view(B, seq_len, self.n_kv_heads, self.head_dim)
+        xv = xv.view(B, seq_len, self.n_kv_heads, self.head_dim)
 
-        # Precompute rotary frequencies untuk sequence yang sekarang
         freqs_cis = precompute_freqs_cis(self.head_dim, seq_len, device=self.device)
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
 
-        ##### Key Fixes ####
-        scaling_factor = 1.0 / math.sqrt(self.head_dim)
-        xq = xq * scaling_factor
-        xk = xk * scaling_factor
+        keys = repeat_kv(xk, self.n_rep)
+        values = repeat_kv(xv, self.n_rep)
 
+        xq = xq.transpose(1, 2)
+        keys = keys.transpose(1, 2)
+        values = values.transpose(1, 2)
 
-        # Replikasi keys dan values agar jumlah head sesuai dengan query
-        keys = repeat_kv(xk, self.n_rep)    # (B, seq_len, n_heads, head_dim)
-        values = repeat_kv(xv, self.n_rep)    # (B, seq_len, n_heads, head_dim)
+        phi = lambda x: F.elu(x) + 1
 
-        # Pindahkan dim head ke posisi kedua
-        xq = xq.transpose(1, 2)      # (B, n_heads, seq_len, head_dim)
-        keys = keys.transpose(1, 2)  # (B, n_heads, seq_len, head_dim)
-        values = values.transpose(1, 2)  # (B, n_heads, seq_len, head_dim)
+        Q_lin = phi(xq)
+        K_lin = phi(keys)
+        V_lin = values
 
-        q_max = xq.max(dim=-1, keepdim=True)[0]
-        k_max = keys.max(dim=-1, keepdim=True)[0]
-        xq = xq - q_max
-        keys = keys - k_max
-
-        # Gunakan kernel φ(x) = elu(x) + 1 untuk linear attention
-        phi = lambda x: F.elu(x).clamp(min=-0.99) + 1
-
-        Q_lin = phi(xq)      # (B, n_heads, seq_len, head_dim)
-        K_lin = phi(keys)    # (B, n_heads, seq_len, head_dim)
-
-        # Hitung KV = sum_{s} ( φ(K(s)) ⊗ V(s) ) → (B, n_heads, head_dim)
-        KV = torch.einsum("bn s d, bn s d -> bn d", K_lin, values)
-        # Hitung K_sum = sum_{s} φ(K(s)) → (B, n_heads, head_dim)
+        KV = torch.einsum("b h s d, b h s v -> b h d v", K_lin, V_lin)
         K_sum = K_lin.sum(dim=2)
-        # Hitung normalisasi per posisi: Z = ⟨φ(Q(s)), sum_s φ(K(s))⟩ → (B, n_heads, seq_len, 1)
-        Z = torch.einsum("bn s d, bn d -> bn s", Q_lin, K_sum).unsqueeze(-1)
 
-        # Hitung output: Y = ⟨φ(Q(s)), KV⟩ / (Z + eps)
-        Y = torch.einsum("bn s d, bn d -> bn s d", Q_lin, KV)
-        eps = 1e-3
+        Z = torch.einsum("b h s d, b h d -> b h s", Q_lin, K_sum).unsqueeze(-1)
+        Y = torch.einsum("b h s d, b h d v -> b h s v", Q_lin, KV)
+
+        eps = 1e-6
         Y = Y / (Z + eps)
 
-        # Kembalikan shape ke (B, seq_len, n_heads * head_dim)
         Y = Y.transpose(1, 2).contiguous().view(B, seq_len, -1)
-        output = self.wo(Y)  # (B, seq_len, self.dim)
+        output = self.wo(Y)
 
         if is_image:
-            # Kembalikan ke bentuk (B, C, H, W) (dengan C == self.dim)
             output = output.transpose(1, 2).view(B, self.dim, H, W)
         
         return output
@@ -354,12 +423,10 @@ class DownBlock(nn.Module):
 
         self.block1 = ConvNeXtV2Block(in_channels, time_embedding_dim=time_dim, cond_dim=cond_dim, use_film=True)
         self.block2 = ConvNeXtV2Block(in_channels, time_embedding_dim=time_dim, cond_dim=cond_dim, use_film=True)
-        # self.block1 = DummyConv2D(in_channels, time_embedding_dim=time_dim)
-        # self.block2 = DummyConv2D(in_channels, time_embedding_dim=time_dim)
         self.downsample = Downsample(in_channels, out_channels, with_conv=True)
 
         if use_attn:
-            self.attn = RotaryLinearAttention(in_channels, n_heads=8, n_kv_heads=8)
+            self.attn = LinearAttention(in_channels, n_heads=32, n_kv_heads=32)
             # self.attn = nn.Identity()
         else:
             self.attn = None
@@ -404,13 +471,11 @@ class UpBlock(nn.Module):
 
         self.block1 = ConvNeXtV2Block(in_channels, time_embedding_dim=time_dim, cond_dim=cond_dim, use_film=True)
         self.block2 = ConvNeXtV2Block(in_channels, time_embedding_dim=time_dim, cond_dim=cond_dim, use_film=True)
-        # self.block1 = DummyConv2D(in_channels, time_embedding_dim=time_dim)
-        # self.block2 = DummyConv2D(in_channels, time_embedding_dim=time_dim)
         
         self.upsample = Upsample(in_channels, out_channels, with_conv=True)
         
         if use_attn:
-            self.attn = RotaryLinearAttention(in_channels, n_heads=8, n_kv_heads=8)
+            self.attn = LinearAttention(in_channels, n_heads=32, n_kv_heads=32)
             # self.attn = nn.Identity()
         else:
             self.attn = None
@@ -463,12 +528,9 @@ class RotaryUNet(nn.Module):
         self.down_blocks.append(DownBlock(ch*4, ch*8, time_dim, use_attn=True))
 
         # Middle block with Residual-Attention-Residual structure
-        # self.mid_block1 = ResBlock1(ch*8, dilation=(1,))
         self.mid_block1 = ConvNeXtV2Block(ch*8, time_embedding_dim=time_dim, cond_dim=1, use_film=True)
         self.mid_block2 = ConvNeXtV2Block(ch*8, time_embedding_dim=time_dim, cond_dim=1, use_film=True)
-        # self.mid_block1 = DummyConv2D(ch*8, time_embedding_dim=time_dim)
-        # self.mid_block2 = DummyConv2D(ch*8, time_embedding_dim=time_dim)
-        self.mid_attn = RotaryLinearAttention(ch*8, n_heads=8, n_kv_heads=8)
+        self.mid_attn = LinearAttention(ch*8, n_heads=32, n_kv_heads=32)
         # self.mid_attn = nn.Identity()
 
         # Up blocks - decreasing channel dimensions
@@ -499,9 +561,11 @@ class RotaryUNet(nn.Module):
             if len(cond.shape) == 3:
                 cond = cond.unsqueeze(1)
 
-        if not self.use_film:    
-            assert cond.shape[1] == x.shape[1], "Condition tensor must have the same number of channels (C) as input tensor."
-            x = torch.cat([x, cond], dim=1)
+        # if not self.use_film:    
+        #     assert cond.shape[1] == x.shape[1], "Condition tensor must have the same number of channels (C) as input tensor."
+        #     x = torch.cat([x, cond], dim=1)
+
+        x = torch.cat([x, cond], dim=1)
 
         x = self.init_conv(x)
         # print(f"Initial Conv: {x.shape}")
