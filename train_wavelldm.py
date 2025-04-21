@@ -91,7 +91,7 @@ def train(args):
     ).to(device)
 
     unet = create_diffusion_model(
-        in_channels=1,
+        in_channels=2,
         base_channels=32,
         out_channels=1,
         time_dim=32,
@@ -209,7 +209,8 @@ def train(args):
         quantizer=ffgan.quantizer,
         decoder=ffgan.head,
         beta_scheduler="cosine",
-        device=device
+        device=device,
+        recon_loss_weight=0.0001,
     )
 
     # Initialize and train
