@@ -139,6 +139,20 @@ class DenoiserDataset(Dataset):
         if self.add_random_cutting:
             noisy_audio = random_cut(noisy_audio, max_cuts=self.max_cuts, cut_duration=self.cut_duration, sample_rate=clean_sr)
 
+        # Jika fixed_length diset, crop atau pad audio supaya panjangnya seragam
+        # if self.fixed_length is not None:
+        #     if clean_audio.size(-1) > self.fixed_length:
+        #         # Crop secara acak jika audio lebih panjang dari fixed_length
+        #         max_offset = clean_audio.size(-1) - self.fixed_length
+        #         offset = random.randint(0, max_offset)
+        #         clean_audio = clean_audio[..., offset:offset + self.fixed_length]
+        #         noisy_audio = noisy_audio[..., offset:offset + self.fixed_length]
+        #     else:
+        #         # Pad dengan nol jika audio lebih pendek dari fixed_length
+        #         pad_amount = self.fixed_length - clean_audio.size(-1)
+        #         clean_audio = torch.nn.functional.pad(clean_audio, (0, pad_amount))
+        #         noisy_audio = torch.nn.functional.pad(noisy_audio, (0, pad_amount))
+
         ################### MODIFIKASI #######################
         if self.fixed_length is not None:
             audio_length = clean_audio.size(-1)
