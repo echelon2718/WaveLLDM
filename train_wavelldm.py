@@ -1,7 +1,6 @@
 import argparse
 import torch
 from torch.utils.data import DataLoader
-import torch.multiprocessing as mp
 
 import models
 from models.modules import *
@@ -12,7 +11,6 @@ from models.lldm_architecture import WaveLLDM
 from training.trainer_wavelldm import WaveLLDMTrainer
 
 from torch.utils.data.distributed import DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import os
 
@@ -29,7 +27,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=3e-5, help="Learning rate")
     parser.add_argument("--use_lr_scheduler", type=bool, default=True, help="Choose whether using LR scheduler or not")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of DataLoader workers")
-    parser.add_argument("--pretrained_codec_path", type=str, default="./pretrained_models/generator_step_142465.pth", help="Path to pretrained codec model")
+    parser.add_argument("--pretrained_codec_path", type=str, default="./pretrained_models/codec_latest_snapshot.pth", help="Path to pretrained codec model")
     parser.add_argument("--snapshot_path", type=str, default=None, help="Path to latest training snapshot (optional)")
     return parser.parse_args()
 
@@ -99,7 +97,9 @@ def train(args):
     ).to(device)
 
     # Load pretrained weights and set to evaluation mode
-    ffgan.load_state_dict(torch.load(args.pretrained_codec_path))
+    codec_states = torch.load(args.pretrained_codec_path)
+    ffgan.load_state_dict(codec_states["model_state_dict"])
+    del codec_states
     ffgan.eval()
 
     # -----------------------------
