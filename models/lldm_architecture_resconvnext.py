@@ -10,7 +10,6 @@ import os
 from models.unet2d import create_diffusion_model
 from training.scheduler import linear_warmup_cosine_decay
 from torch.optim.lr_scheduler import LambdaLR
-from training.losses import MultiScaleSpecLoss, EnhancedMultiScaleSTFTLoss
 
 def extract_into_tensor(a, t, x_shape):
     b, *_ = t.shape
@@ -81,7 +80,7 @@ class DDPM(nn.Module):
         parameterization: str = "eps", # parametrisasi untuk noise (eps atau x0)
         learn_logvar: bool = False,
         logvar_init: float = 0.0,
-        recon_loss_weight: float = 0.1,
+        recon_loss_weight: float = 0.0,
         device: int = int(os.environ["LOCAL_RANK"]), # perangkat untuk model (CPU atau GPU)
     ):
         super().__init__()
@@ -92,8 +91,6 @@ class DDPM(nn.Module):
         self.device = device
         self.recon_loss_weight = recon_loss_weight
         self.p_estimator = p_estimator
-        self.melspec_loss = MultiScaleSpecLoss()
-        self.stft_loss = EnhancedMultiScaleSTFTLoss()
 
         # ================= parameter untuk difusi ================= #
         self.num_timesteps = num_timesteps
@@ -420,66 +417,7 @@ class WaveLLDM(DDPM):
             x_recon.clamp_(-1., 1.)
         return self.q_posterior(x_start=x_recon, x_t=x, t=t)
 
-    def spectral_loss(self, z_start, z_t, noise_pred, t, gt_batch, melspec_loss, stft_loss):
-        '''
-        Fungsi untuk menghitung loss spektral dan rekonstruksi.
-
-        Args:
-            z_start (Tensor): Tensor laten audio asli sebelum quantization, 
-                berbentuk (B, n_emb, L).
-            z_t (Tensor): Tensor laten audio dengan noise pada timestep t, 
-                q(z_t | z_start), berbentuk (B, n_emb, L).
-            noise_pred (Tensor): Noise yang diprediksi oleh model (ε_θ), 
-                berbentuk (B, n_emb, L).
-            t (Tensor): Timestep untuk forward diffusion, berbentuk (B,).
-            gt_batch (Tensor): Ground truth audio dalam batch. 
-            melspec_loss (function): Fungsi loss untuk mel spectrogram.
-            stft_loss (function): Fungsi loss untuk short-time Fourier transform.
-
-        Returns:
-            Tensor: Total loss yang merupakan gabungan dari spectral loss dan reconstruction loss.
-        '''
-        # Spectral loss designed for training with uniform length! Make sure you provide fixed_length in args, otherwise it won't work properly!
-
-        # RECON LOSS (MSE)
-        z_start_recon = self.predict_start_from_noise(x_t=z_t, t=t, noise=noise_pred)
-        recon_loss = self.get_loss(z_start, z_start_recon, mean=True)
-
-        # SPECTRAL LOSS
-        ground_truth_audio_arr = gt_batch["clean_audio"] # Antara (B, 1, N_Sample) atau (B, N_Sample)... perlu dipastikan lagi
-        first_length = gt_batch["lengths"][0] # Default 112
-        recon_audio_latents = z_start_recon[:, :, :first_length]
-        
-        with torch.no_grad():
-            recon_audio_latents, _ = self.quantizer.residual_fsq(recon_audio_latents.mT)
-            recon_audio_upsampled_latents = self.quantizer.upsample(recon_audio_latents.mT)
-        
-        diff = gt_batch["melspec_lengths"][0] - recon_audio_upsampled_latents.shape[-1] # Default 448
-        left = max(diff // 2, 0)  # Pastikan left tidak negatif
-        right = max(diff - left, 0)
-        
-        if diff > 0:
-            recon_audio_upsampled_latents = F.pad(recon_audio_upsampled_latents, (left, right))
-        elif diff < 0:
-            left = max(-diff // 2, 0)  # Pastikan slicing dimulai dari 0
-            right = recon_audio_upsampled_latents.shape[-1] + diff + left
-            recon_audio_upsampled_latents = recon_audio_upsampled_latents[..., left:right]
-
-        # print(f"5 -> {recon_audio_upsampled_latents.shape}, {clean_audio_upsampled_latents.shape}") # uncomment untuk debug
-
-        with torch.no_grad():
-            recon_audio = self.decode(recon_audio_upsampled_latents) # Antara (B, 1, N_Sample) atau (B, N_Sample)... perlu dipastikan lagi
-        
-        # Pastikan panjang recon_audio dan ground_truth_audio_arr sama
-        if recon_audio.shape[-1] != ground_truth_audio_arr.shape[-1]:
-            ground_truth_audio_arr = ground_truth_audio_arr[:, :, :recon_audio.shape[-1]]
-
-        
-        spectogram_loss = melspec_loss(recon_audio, ground_truth_audio_arr, device=recon_audio.device) + stft_loss(recon_audio, ground_truth_audio_arr, device=recon_audio.device)
-
-        return recon_loss, spectogram_loss
-
-    def p_losses(self, z_start, t, y, noise=None, add_recon_loss=False, gt_batch=None): 
+    def p_losses(self, z_start, t, y, noise=None, add_recon_loss=False):
         # Generate noise if not provided
         noise = default(noise, lambda: torch.randn_like(z_start))
         # Sample noisy latents from q(x_t | x_0)
@@ -501,16 +439,7 @@ class WaveLLDM(DDPM):
         log_prefix = 'train' if self.training else 'val'
 
         loss_dict.update({f'{log_prefix}/loss_simple': loss})
-        loss_simple = loss * self.l_simple_weight
-
-        if add_recon_loss:
-            assert gt_batch is not None, "Ground-truth batch must be provided for training with recon loss!"
-            recon_loss, spectogram_loss = self.spectral_loss(z_start, z_noisy, model_out, t, gt_batch, self.melspec_loss, self.stft_loss) # Sek ini belum selesai
-            loss_dict.update({f'{log_prefix}/recon_loss': recon_loss})
-            loss_dict.update({f'{log_prefix}/spec_loss': spectogram_loss})
-
-        loss = loss_simple + self.recon_loss_weight * (recon_loss + spectogram_loss) if add_recon_loss else loss_simple
-
+        loss = loss * self.l_simple_weight
         return loss, loss_dict
     
     @torch.no_grad()
@@ -569,5 +498,5 @@ class WaveLLDM(DDPM):
         t = torch.randint(0, self.num_timesteps, (clean_latents.shape[0],), device=self.device).long()
         
         # Compute loss using p_losses, conditioned on degraded_latents
-        loss, loss_dict = self.p_losses(clean_latents, t, degraded_latents, add_recon_loss=True, gt_batch=batch)
-        return loss, loss_dict 
+        loss, loss_dict = self.p_losses(clean_latents, t, degraded_latents, add_recon_loss=False)
+        return loss, loss_dict
