@@ -167,8 +167,8 @@ class WaveLLDMTrainer:
                 for idx, batch in enumerate(self.train_dataloader):
                     try:
                         self.optimizer.zero_grad()
-                        with amp.autocast(device_type="cuda"):
-                            loss, loss_dict = self.train_step(batch)
+                        # with amp.autocast(device_type="cuda"):
+                        loss, loss_dict = self.train_step(batch)
                         
                         if torch.isnan(loss) or torch.isinf(loss):
                             print(f"NaN/Inf loss at step {idx}, skipping batch")
