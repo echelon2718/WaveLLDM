@@ -26,17 +26,13 @@ def random_cut(audio, max_cuts=5, cut_duration=0.1, sample_rate=16000):
     """
     audio_length = audio.shape[-1]
     cut_samples = int(cut_duration * sample_rate)
-    # num_cuts = random.randint(1, max_cuts)  # Pilih jumlah cut secara acak antara 1 hingga max_cuts
-    # for _ in range(num_cuts):
-    #     start = random.randint(0, audio_length - cut_samples)
-    #     audio[:, start:start + cut_samples] = 0
 
     num_cuts = torch.randint(1, max_cuts + 1, (1,)).item()
     starts = torch.randint(0, audio_length - cut_samples + 1, (num_cuts,))
     mask = torch.ones_like(audio)
     for start in starts:
         mask[..., start:start + cut_samples] = 0
-    # return audio
+        
     return audio * mask
 
 def collate_fn_latents(batch):
@@ -109,22 +105,13 @@ class DenoiserDataset(Dataset):
     
     def __getitem__(self, idx):
         # Load audio clean
-        # clean_audio, clean_sr = librosa.load(os.path.join(self.clean_dir, self.clean_files[idx]), sr=44100)
         clean_audio, clean_sr = torchaudio.load(os.path.join(self.clean_dir, self.clean_files[idx]))
         clean_audio = clean_audio.unsqueeze(0)
 
         # Pilih sample rate acak untuk audio noisy agar bervariasi, lalu resample ke clean_sr
-        # noisy_sr = int(clean_sr / (np.random.randint(1, 3) + 1))
-        # noisy_audio, noisy_sr = librosa.load(os.path.join(self.noisy_dir, self.noisy_files[idx]), sr=noisy_sr)
-        # noisy_audio = librosa.resample(noisy_audio, orig_sr=noisy_sr, target_sr=clean_sr)
-        # noisy_sr_new = clean_sr
         noisy_sr = int(clean_sr / (torch.randint(1, 3, (1,)).item() + 1))
         noisy_audio, orig_noisy_sr = torchaudio.load(os.path.join(self.noisy_dir, self.noisy_files[idx]))
         noisy_audio = noisy_audio.unsqueeze(0)
-
-        # Ubah ke tensor dan tambahkan dimensi channel
-        # clean_audio = torch.tensor(clean_audio).unsqueeze(0)
-        # noisy_audio = torch.tensor(noisy_audio).unsqueeze(0)
 
         # Resample noisy audio ke clean_sr [BARU]
         if orig_noisy_sr != noisy_sr:
@@ -140,20 +127,6 @@ class DenoiserDataset(Dataset):
             noisy_audio = random_cut(noisy_audio, max_cuts=self.max_cuts, cut_duration=self.cut_duration, sample_rate=clean_sr)
 
         # Jika fixed_length diset, crop atau pad audio supaya panjangnya seragam
-        # if self.fixed_length is not None:
-        #     if clean_audio.size(-1) > self.fixed_length:
-        #         # Crop secara acak jika audio lebih panjang dari fixed_length
-        #         max_offset = clean_audio.size(-1) - self.fixed_length
-        #         offset = random.randint(0, max_offset)
-        #         clean_audio = clean_audio[..., offset:offset + self.fixed_length]
-        #         noisy_audio = noisy_audio[..., offset:offset + self.fixed_length]
-        #     else:
-        #         # Pad dengan nol jika audio lebih pendek dari fixed_length
-        #         pad_amount = self.fixed_length - clean_audio.size(-1)
-        #         clean_audio = torch.nn.functional.pad(clean_audio, (0, pad_amount))
-        #         noisy_audio = torch.nn.functional.pad(noisy_audio, (0, pad_amount))
-
-        ################### MODIFIKASI #######################
         if self.fixed_length is not None:
             audio_length = clean_audio.size(-1)
             if audio_length > self.fixed_length:
