@@ -3,7 +3,7 @@ from math import cos, pi, floor, sin
 from torch.optim import lr_scheduler
 from torch.optim.lr_scheduler import LambdaLR
 
-def linear_warmup_cosine_decay(warmup_steps=1000, total_steps=500_000):
+def linear_warmup_cosine_decay(warmup_steps=50_000, total_steps=1_000_000):
     def lr_lambda(current_step):
         if current_step < warmup_steps:
             return current_step / warmup_steps
