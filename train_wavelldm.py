@@ -209,8 +209,7 @@ def train(args):
         quantizer=ffgan.quantizer,
         decoder=ffgan.head,
         beta_scheduler="cosine",
-        device=device,
-        recon_loss_weight=0.0001,
+        device=device
     )
 
     # Initialize and train
