@@ -4,12 +4,8 @@ import torch.nn.functional as F
 import numpy as np
 from tqdm.notebook import tqdm
 from inspect import isfunction
-from torch.optim import AdamW, Adam
 import os
-
-from models.unet2d import create_diffusion_model
-from training.scheduler import linear_warmup_cosine_decay
-from torch.optim.lr_scheduler import LambdaLR
+import math
 
 ### UTIL FUNCTIONS ###  
 def extract_into_tensor(a, t, x_shape):
@@ -101,33 +97,6 @@ class EMA:
             for name, param in model.named_parameters():
                 if param.requires_grad:
                     self.shadow[name] = self.shadow[name] * self.decay + param.data * (1 - self.decay)
-class EMA:
-    """Exponential Moving Average untuk model parameters"""
-    def __init__(self, model, decay=0.9999):
-        self.decay = decay
-        self.shadow = {}
-        self.original = {}
-        
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.clone()
-                
-    def apply(self, model):
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.original[name] = param.data.clone()
-                param.data.copy_(self.shadow[name])
-
-    def restore(self, model):
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                param.data.copy_(self.original[name])
-    
-    def update(self, model):
-        with torch.no_grad():
-            for name, param in model.named_parameters():
-                if param.requires_grad:
-                    self.shadow[name] = self.shadow[name] * self.decay + param.data * (1 - self.decay)
 
 class DDPM(nn.Module):
     def __init__(
@@ -136,16 +105,14 @@ class DDPM(nn.Module):
         num_timesteps: int = 1000, # jumlah timestep maksimum denoising
         beta_scheduler: str = "linear", # scheduler beta untuk mengatur intensitas noise, opsi: linear, cosine, sqrt_linear, sqrt
         loss_type: str = "l2", # loss function yang digunakan, l2 = MSE, l1 = MAE
-        p_ckpt: str = None, # checkpoint model unet jika ada, ekspektasi format adalah .pth
-        use_ema: bool = True, # menggunakan exponential moving average untuk mengatur parameter model selama training
         log_every: int = 100, # frekuensi logging
+        use_ema: bool = True, # menggunakan exponential moving average untuk mengatur parameter model selama training
         clip_denoised=True, # apakah akan meng-clamp hasil denoising ke rentang [-1, 1]
         ema_decay: float = 0.9999, # decay rate untuk EMA
         linear_start: float = 1e-4, # nilai beta awal untuk scheduler linear
         linear_end: float = 2e-2, # nilai beta akhir untuk scheduler linear
         cosine_s: float = 0.008, # parameter untuk cosine scheduler (konteks beta scheduler, bukan learning rate)
         given_betas: list = None, # jika diberikan, gunakan beta yang sudah ada
-        v_posterior: float = 0., # parameter untuk posterior variance, parametrisasi posterior variance (Nichol & Dhariwal, 2021)
         l_simple_weight: float = 1., # bobot untuk loss sederhana
         original_elbo_weight: float = 0.0001, # bobot untuk loss ELBO asli
         conditioning_key: str = "z_noisy", # kunci untuk data yang digunakan untuk conditioning (misalnya, "z_noisy" untuk denoising)
@@ -163,14 +130,16 @@ class DDPM(nn.Module):
         self.device = device
         self.recon_loss_weight = recon_loss_weight
         self.p_estimator = p_estimator
+        self.use_ema = use_ema
 
         # ================= parameter untuk difusi ================= #
         self.num_timesteps = num_timesteps
         self.beta_scheduler = beta_scheduler
-        self.betas = given_betas if given_betas is not None else self.beta_schedule(
-            beta_start=linear_start,
-            beta_end=linear_end,
-            n_timestep=num_timesteps,
+        self.betas = given_betas if given_betas is not None else self.get_beta_schedule(
+            beta_schedule="cosine",
+            num_timesteps=num_timesteps,
+            linear_start=linear_start,
+            linear_end=linear_end,
             cosine_s=cosine_s,
         )
         
@@ -186,12 +155,12 @@ class DDPM(nn.Module):
         self.sqrt_recipm1_alphas_cumprod    = np.sqrt(1. / self.alphas_cumprod - 1)
 
         # kalkulasi untuk posterior q(x_{t-1} | x_t, x_0)
-        self.posterior_variance             = (betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod))
+        self.posterior_variance             = (self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod))
         self.posterior_log_variance_clipped = np.log(
             np.append(self.posterior_variance[1], self.posterior_variance[1:])
         )
         self.posterior_mean_coef1           = (
-            betas * np.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+            self.betas * np.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
         )
         self.posterior_mean_coef2           = (
             (1.0 - self.alphas_cumprod_prev)
@@ -230,10 +199,6 @@ class DDPM(nn.Module):
 
         # ======================================================== #
 
-
-        self.loss = nn.MSELoss() if loss_type == "l2" else nn.L1Loss()
-        self.p_ckpt = p_ckpt
-        self.use_ema = use_ema
         self.log_every = log_every
         self.ema_decay = ema_decay
         
@@ -278,7 +243,7 @@ class DDPM(nn.Module):
     def beta_for_alpha_bar(
         self, 
         num_timesteps : int, 
-        alpha_bar : function, 
+        alpha_bar, 
         max_beta : float = 0.999
     ):
         betas = []
@@ -481,7 +446,7 @@ class WaveLLDM(DDPM):
             encoder: nn.Module, # model encoder untuk mengubah data ke latent space
             decoder: nn.Module, # model decoder untuk mengubah data dari latent space ke data asli
             quantizer, # model quantizer untuk mengubah data ke representasi diskrit
-            std_scale_factor: float = 0.5061, # apakah akan melakukan rescaling pada latent space
+            std_scale_factor: float = 1.0, # apakah akan melakukan rescaling pada latent space. Default 0.5061
             z_dim: int = 512, # dimensi latent space
             ema_decay: float = 0.9999, # decay rate untuk EMA
             use_latent: bool = True, # apakah akan menggunakan latent space untuk training
