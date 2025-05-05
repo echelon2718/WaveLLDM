@@ -120,7 +120,7 @@ class DDPM(nn.Module):
         learn_logvar: bool = False,
         logvar_init: float = 0.0,
         recon_loss_weight: float = 0.0,
-        device: int = int(os.environ["LOCAL_RANK"]), # perangkat untuk model (CPU atau GPU)
+        device: str = "cuda", # perangkat untuk model (CPU atau GPU)
     ):
         super().__init__()
         assert parameterization in ["eps", "x0"], 'currently only supporting "eps" and "x0"'
@@ -443,6 +443,7 @@ class DDPM(nn.Module):
 class WaveLLDM(DDPM):
     def __init__(
             self,
+            spec_trans: nn.Module, # modul transformasi spektogram
             encoder: nn.Module, # model encoder untuk mengubah data ke latent space
             decoder: nn.Module, # model decoder untuk mengubah data dari latent space ke data asli
             quantizer, # model quantizer untuk mengubah data ke representasi diskrit
@@ -462,6 +463,7 @@ class WaveLLDM(DDPM):
         self.z_dim = z_dim
         self.use_latent = use_latent
 
+        self.spec_trans = spec_trans.to(self.device)
         self.encoder = encoder.to(self.device)
         self.decoder = decoder.to(self.device)
         self.ema = EMA(self.p_estimator, decay=ema_decay)
@@ -583,17 +585,24 @@ class WaveLLDM(DDPM):
         return img
 
     def forward(self, batch):
-        # Encode clean and degraded audio to latent space
-        clean_latents = batch["clean_audio_downsampled_latents"]
-        degraded_latents = batch["noisy_audio_downsampled_latents"]
+        # Dapatkan audio
+        clean_audios = batch["clean_audios"] # Shape: B, 1, L
+        noisy_audios = batch["noisy_audios"] # Shape: B, 1, L
+
+        clean_spec = self.spec_trans(clean_audios) # Shape: B, n_mel, l
+        noisy_spec = self.spec_trans(noisy_audios) # Shape: B, n_mel, l
+
+        clean_latents = self.encode(clean_spec) # Shape: B, base_dim, l
+        noisy_latents = self.encode(noisy_spec) # Shape: B, base_dimdim, l
 
         if self.std_scale_factor: # Rescale latents if std_scale_factor is provided (1/std_scale_factor * latents)
             clean_latents = clean_latents * (1./self.std_scale_factor)
-            degraded_latents = degraded_latents * (1./self.std_scale_factor)
+            noisy_latents = noisy_latents * (1./self.std_scale_factor)
+        
         
         # Sample timestep t
         t = torch.randint(0, self.num_timesteps, (clean_latents.shape[0],), device=self.device).long()
         
         # Compute loss using p_losses, conditioned on degraded_latents
-        loss, loss_dict = self.p_losses(clean_latents, t, degraded_latents, add_recon_loss=False)
+        loss, loss_dict = self.p_losses(clean_latents, t, noisy_latents, add_recon_loss=False)
         return loss, loss_dict
