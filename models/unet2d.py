@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import math
 import torch.nn.functional as F
-from timm.models.layers import DropPath
+from timm.layers import DropPath
 from models.unet import RMSNorm
 from typing import Tuple
 import os
@@ -74,6 +74,7 @@ class SpatialFiLM(nn.Module):
         gamma = self.gamma_conv(cond_resized)
         beta  = self.beta_conv(cond_resized)
         return gamma * x + beta
+        
 
 class LayerNorm2D(nn.Module):
     """ LayerNorm that supports two data formats: channels_last (default) or channels_first. 
@@ -122,71 +123,169 @@ class GlobalResponseNorm(nn.Module):
         Nx = Gx / (Gx.mean(dim=-1, keepdim=True) + eps)
         return self.gamma * (x * Nx) + self.beta + x
 
-class ConvNeXtV2Block(nn.Module):
-    """ ConvNeXtV2 Block.
+# class ConvNeXtV2Block(nn.Module):
+#     """ ConvNeXtV2 Block.
     
+#     Args:
+#         dim (int): Number of input channels.
+#         drop_path (float): Stochastic depth rate. Default: 0.0
+#         time_embedding_dim (int, optional): Dimension of time embedding. If None, time embedding is not used.
+#     """
+#     def __init__(self, dim, drop_path=0., time_embedding_dim=None, cond_dim=None, use_film=True):
+#         super().__init__()
+#         self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
+#         self.norm = LayerNorm2D(dim, eps=1e-6)
+#         self.pwconv1 = nn.Linear(dim, 4 * dim)  # pointwise/1x1 convs, implemented with linear layers
+#         self.act = nn.GELU()
+#         self.grn = GlobalResponseNorm(4 * dim)
+#         self.pwconv2 = nn.Linear(4 * dim, dim)
+#         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+#         self.time_embedding_dim = time_embedding_dim
+#         self.residual = True
+#         self.use_film = use_film
+#         if use_film:
+#             assert cond_dim is not None, "Provide conditioning dim if you want to use FiLM layer."
+#             self.film_layer = SpatialFiLM(cond_dim, dim)
+        
+#         if time_embedding_dim is not None:
+#             self.proj_network = nn.Sequential(
+#                 nn.Linear(time_embedding_dim, 512),
+#                 nn.SiLU(),
+#                 nn.Linear(512, dim),
+#                 nn.SiLU(),
+#             )
+#         else:
+#             self.proj_network = None
+
+#     def forward(self, x, temb=None, cond=None):
+#         if self.time_embedding_dim is not None:
+#             if temb is None:
+#                 # Buat temb default berisi nol jika tidak diberikan
+#                 temb = torch.zeros(x.size(0), self.time_embedding_dim, device=x.device)
+#             assert len(temb.shape) == 2, f"Ukuran time embedding harus dua (batch_size x channels), bukan {temb.shape}"
+#             x = x + self.proj_network(temb)[:, :, None, None]
+#         else:
+#             if temb is not None:
+#                 print("Peringatan: time_embedding_dim adalah None, tetapi temb diberikan. temb diabaikan.")
+
+#         if self.use_film:
+#             assert cond is not None, "You haven't pass the conditioning for FiLM. Pass it first via self.forward(x, temb, cond)"
+#             x = self.film_layer(x, cond)
+
+
+#         input = x
+#         x = self.dwconv(x)
+#         x = x.permute(0, 2, 3, 1)  # (N, C, H, W) -> (N, H, W, C)
+#         x = self.norm(x)
+#         x = self.pwconv1(x)
+#         x = self.act(x)
+#         x = self.grn(x)
+#         x = self.pwconv2(x)
+#         x = x.permute(0, 3, 1, 2)  # (N, H, W, C) -> (N, C, H, W)
+
+#         if self.residual:
+#             x = input + x
+#         else:
+#             x = input + self.drop_path(x)
+#         return x
+
+class ConvNeXtV2Block(nn.Module):
+    """ConvNeXtV2 Block with combined timestep & spatial conditioning FiLM.
+
     Args:
         dim (int): Number of input channels.
-        drop_path (float): Stochastic depth rate. Default: 0.0
-        time_embedding_dim (int, optional): Dimension of time embedding. If None, time embedding is not used.
+        drop_path (float): Stochastic depth rate.
+        time_embedding_dim (int, optional): Dim of timestep embedding.
+        cond_channels (int, optional): Number of channels of spatial conditioning map.
     """
-    def __init__(self, dim, drop_path=0., time_embedding_dim=None, cond_dim=None, use_film=False):
+    def __init__(
+        self,
+        dim,
+        drop_path=0.,
+        time_embedding_dim=None,
+        cond_dim=None,
+    ):
         super().__init__()
-        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
-        self.norm = LayerNorm2D(dim, eps=1e-6)
-        self.pwconv1 = nn.Linear(dim, 4 * dim)  # pointwise/1x1 convs, implemented with linear layers
+        self.dim = dim
+        self.use_temporal = time_embedding_dim is not None
+        self.use_film = cond_dim is not None
+        self.time_embedding_dim = time_embedding_dim
+        self.cond_channels = cond_dim
+
+        # Depthwise conv
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)
+        # Norm expects (N,H,W,C)
+        self.norm = LayerNorm2D(dim)
+        # Pointwise MLP
+        self.pwconv1 = nn.Linear(dim, 4 * dim)
         self.act = nn.GELU()
         self.grn = GlobalResponseNorm(4 * dim)
         self.pwconv2 = nn.Linear(4 * dim, dim)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.time_embedding_dim = time_embedding_dim
-        self.residual = True
-        self.use_film = use_film
-        if use_film:
-            assert cond_dim is not None, "Provide conditioning dim if you want to use FiLM layer."
-            self.film_layer = SpatialFiLM(cond_dim, dim)
-        
-        if time_embedding_dim is not None:
+        # Stochastic depth
+        self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
+
+        # Projection network for timestep injection
+        if self.use_temporal:
             self.proj_network = nn.Sequential(
                 nn.Linear(time_embedding_dim, 512),
                 nn.SiLU(),
                 nn.Linear(512, dim),
                 nn.SiLU(),
             )
-        else:
-            self.proj_network = None
+        # Spatial FiLM projection: concat [temb_proj,broadcast, cond] -> [scale|shift] map
+        if self.use_film:
+            emb_ch = (dim if self.use_temporal else 0) + cond_dim
+            self.film_conv = nn.Conv2d(emb_ch, 2 * dim, kernel_size=1)
 
     def forward(self, x, temb=None, cond=None):
-        if self.time_embedding_dim is not None:
-            if temb is None:
-                # Buat temb default berisi nol jika tidak diberikan
-                temb = torch.zeros(x.size(0), self.time_embedding_dim, device=x.device)
-            assert len(temb.shape) == 2, f"Ukuran time embedding harus dua (batch_size x channels), bukan {temb.shape}"
-            x = x + self.proj_network(temb)[:, :, None, None]
-        else:
-            if temb is not None:
-                print("Peringatan: time_embedding_dim adalah None, tetapi temb diberikan. temb diabaikan.")
-
-        if self.use_film:
-            assert cond is not None, "You haven't pass the conditioning for FiLM. Pass it first via self.forward(x, temb, cond)"
-            x = self.film_layer(x, cond)
-
-
-        input = x
+        """
+        x: (N,C,H,W) input feature map
+        temb: (N, time_embedding_dim) or None
+        cond: (N, cond_channels, H, W) or None
+        """
+        residual = x
         x = self.dwconv(x)
-        x = x.permute(0, 2, 3, 1)  # (N, C, H, W) -> (N, H, W, C)
+
+        # Build film map
+        film_input = []
+        if self.use_temporal:
+            if temb is None:
+                temb = torch.zeros(x.size(0), self.time_embedding_dim, device=x.device)
+            temb_out = self.proj_network(temb)  # (N, dim)
+            # broadcast to spatial
+            b, c, h, w = x.shape
+            temb_map = temb_out.view(b, c, 1, 1).expand(-1, -1, h, w)
+            film_input.append(temb_map)
+            # print(film_input[0].shape)
+        if self.use_film:
+            assert cond is not None, "cond map must be provided"
+            cond_resized = F.interpolate(cond, size=x.shape[2:], mode='bilinear', align_corners=False)
+            film_input.append(cond_resized)
+            # print(film_input[1].shape)
+
+        # Norm & FiLM
+        x = x.permute(0, 2, 3, 1)  # to (N,H,W,C)
         x = self.norm(x)
+        x = x.permute(0, 3, 1, 2)  # back to (N,C,H,W)
+        if self.use_film:
+            film_cat = torch.cat(film_input, dim=1)  # (N,emb_ch,H,W)
+            # print("SAMPE SINI OKE", film_cat.shape)
+            scale_shift = self.film_conv(film_cat)   # (N,2*dim,H,W)
+            scale, shift = scale_shift.chunk(2, dim=1)
+            x = x * (1 + scale) + shift
+            # print("use film selesai")
+
+        # MLP
+        x = x.permute(0, 2, 3, 1)  # (N,H,W,C)
         x = self.pwconv1(x)
         x = self.act(x)
         x = self.grn(x)
         x = self.pwconv2(x)
-        x = x.permute(0, 3, 1, 2)  # (N, H, W, C) -> (N, C, H, W)
+        x = x.permute(0, 3, 1, 2)
+        # print("Boboho", x.shape)
+        # print("Boboho2", residual.shape)
+        return residual + self.drop_path(x)
 
-        if self.residual:
-            x = input + x
-        else:
-            x = input + self.drop_path(x)
-        return x
 
 class DummyConv2D(nn.Module):
     def __init__(self, dim, time_embedding_dim=None):
@@ -421,8 +520,8 @@ class DownBlock(nn.Module):
         self.time_dim = time_dim
         self.use_attn = use_attn
 
-        self.block1 = ConvNeXtV2Block(in_channels, time_embedding_dim=time_dim, cond_dim=cond_dim, use_film=True)
-        self.block2 = ConvNeXtV2Block(in_channels, time_embedding_dim=time_dim, cond_dim=cond_dim, use_film=True)
+        self.block1 = ConvNeXtV2Block(in_channels, time_embedding_dim=time_dim, cond_dim=cond_dim)
+        self.block2 = ConvNeXtV2Block(in_channels, time_embedding_dim=time_dim, cond_dim=cond_dim)
         self.downsample = Downsample(in_channels, out_channels, with_conv=True)
 
         if use_attn:
@@ -469,8 +568,8 @@ class UpBlock(nn.Module):
 
         self.head = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
 
-        self.block1 = ConvNeXtV2Block(in_channels, time_embedding_dim=time_dim, cond_dim=cond_dim, use_film=True)
-        self.block2 = ConvNeXtV2Block(in_channels, time_embedding_dim=time_dim, cond_dim=cond_dim, use_film=True)
+        self.block1 = ConvNeXtV2Block(in_channels, time_embedding_dim=time_dim, cond_dim=cond_dim)
+        self.block2 = ConvNeXtV2Block(in_channels, time_embedding_dim=time_dim, cond_dim=cond_dim)
         
         self.upsample = Upsample(in_channels, out_channels, with_conv=True)
         
@@ -528,8 +627,8 @@ class RotaryUNet(nn.Module):
         self.down_blocks.append(DownBlock(ch*4, ch*8, time_dim, use_attn=True))
 
         # Middle block with Residual-Attention-Residual structure
-        self.mid_block1 = ConvNeXtV2Block(ch*8, time_embedding_dim=time_dim, cond_dim=1, use_film=True)
-        self.mid_block2 = ConvNeXtV2Block(ch*8, time_embedding_dim=time_dim, cond_dim=1, use_film=True)
+        self.mid_block1 = ConvNeXtV2Block(ch*8, time_embedding_dim=time_dim, cond_dim=1)
+        self.mid_block2 = ConvNeXtV2Block(ch*8, time_embedding_dim=time_dim, cond_dim=1)
         self.mid_attn = RotaryLinearAttention(ch*8, n_heads=16, n_kv_heads=16)
         # self.mid_attn = nn.Identity()
 
