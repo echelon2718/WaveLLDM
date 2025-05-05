@@ -5,13 +5,12 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW, Adam, SGD
 from training.scheduler import linear_warmup_cosine_decay
 from torch.optim.lr_scheduler import LambdaLR
-from torch.nn.parallel import DistributedDataParallel as DDP
 from inspect import isfunction
 import gc
 
 import torch
 import torch.nn.functional as F
-import torch.amp as amp  # For mixed precision training
+import torch.cuda.amp as amp  # For mixed precision training
 import os
 
 def exists(x):
@@ -22,7 +21,6 @@ def default(val, d):
         return val
     return d() if isfunction(d) else d
 
-# Modified WaveLLDMTrainer
 class WaveLLDMTrainer:
     def __init__(
         self,
@@ -37,15 +35,17 @@ class WaveLLDMTrainer:
         log_dir: str = "./logs",
         save_every: int = 5,
         snapshot_path: str = None,
+        device: str = "cuda"
     ):
-        self.local_rank = int(os.environ["LOCAL_RANK"])
-        self.global_rank = int(os.environ["RANK"])
-        self.model = model.to(self.local_rank)
-        self.model.encoder = self.model.encoder.to(self.local_rank)
-        self.model.decoder = self.model.decoder.to(self.local_rank)
-        self.model.quantizer = self.model.quantizer.to(self.local_rank)
-        self.model.p_estimator = self.model.p_estimator.to(self.local_rank)
-        self.model.device = self.local_rank
+        # self.local_rank = int(os.environ["LOCAL_RANK"])
+        # self.global_rank = int(os.environ["RANK"])
+        self.device = device
+        self.model = model.to(device)
+        self.model.encoder = self.model.encoder.to(device)
+        self.model.decoder = self.model.decoder.to(device)
+        self.model.quantizer = self.model.quantizer.to(device)
+        self.model.p_estimator = self.model.p_estimator.to(device)
+        self.model.device = device
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
         self.epochs = epochs
@@ -69,13 +69,13 @@ class WaveLLDMTrainer:
             print("Loading snapshot...")
             self._load_snapshot(snapshot_path)
 
-        self.model = DDP(self.model, device_ids=[self.local_rank], find_unused_parameters=True)
+        # self.model = DDP(self.model, device_ids=[self.local_rank], find_unused_parameters=False)
         self.use_lr_scheduler = use_lr_scheduler
 
         # Scheduler: define total training steps and warmup
         self.use_lr_scheduler = use_lr_scheduler
         if use_lr_scheduler:
-            total_steps = epochs * len(train_dataloader)
+            total_steps = epochs * 4331
             warmup_steps = int(0.1 * total_steps)
             # LambdaLR expects a function mapping current step to a multiplier
             lr_lambda = linear_warmup_cosine_decay(
@@ -111,8 +111,8 @@ class WaveLLDMTrainer:
         print(f"Resuming training from snapshot at epoch {self.epochs_run}")
 
     def train_step(self, batch):
-        batch["clean_audio_downsampled_latents"] = batch["clean_audio_downsampled_latents"].to(self.local_rank)
-        batch["noisy_audio_downsampled_latents"] = batch["noisy_audio_downsampled_latents"].to(self.local_rank)
+        batch["clean_audios"] = batch["clean_audios"].to(self.device)
+        batch["noisy_audios"] = batch["noisy_audios"].to(self.device)
 
         self.optimizer.zero_grad()
 
@@ -120,7 +120,8 @@ class WaveLLDMTrainer:
 
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
-        torch.nn.utils.clip_grad_norm_(self.model.module.parameters(), max_norm=1.0)  # Gradient clipping
+        # torch.nn.utils.clip_grad_norm_(self.model.module.parameters(), max_norm=1.0)  # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
@@ -128,20 +129,26 @@ class WaveLLDMTrainer:
             self.scheduler.step()
         
         # Update EMA parameters
-        if self.model.module.use_ema:
-            self.model.module.ema.update(self.model.module.p_estimator)
+        # if self.model.module.use_ema:
+        #     self.model.module.ema.update(self.model.module.p_estimator)
+
+        if self.model.use_ema:
+            self.model.ema.update(self.model.p_estimator)
         
         return loss, loss_dict
     
     def validate(self, epoch, val_dataloader, writer):
-        self.model.module.p_estimator.eval()
+        # self.model.module.p_estimator.eval()
+        self.model.p_estimator.eval()
         val_loss = 0.0
         val_steps = 0
 
         with torch.no_grad():
             for batch in tqdm(val_dataloader, desc="Validation"):
-                batch["clean_audio_downsampled_latents"] = batch["clean_audio_downsampled_latents"].to(self.local_rank)
-                batch["noisy_audio_downsampled_latents"] = batch["noisy_audio_downsampled_latents"].to(self.local_rank)
+                batch["clean_audios"] = batch["clean_audios"].to(self.device)
+                batch["noisy_audios"] = batch["noisy_audios"].to(self.device)
+                # batch["clean_audio_downsampled_latents"] = batch["clean_audio_downsampled_latents"].to(self.device)
+                # batch["noisy_audio_downsampled_latents"] = batch["noisy_audio_downsampled_latents"].to(self.device)
 
                 loss, loss_dict = self.model(batch)
                 val_loss += loss.item()
@@ -159,11 +166,11 @@ class WaveLLDMTrainer:
 
     def train(self):
         for epoch in range(self.epochs_run, self.epochs):
-            self.model.train()
+            self.model.p_estimator.train()
             train_loss = 0.0
             train_steps = 0
 
-            with tqdm(total=len(self.train_dataloader), desc=f"[GPU-{self.global_rank}] Epoch {epoch+1}/{self.epochs}", unit="batch") as pbar:
+            with tqdm(total=len(self.train_dataloader), desc=f"Epoch {epoch+1}/{self.epochs}", unit="batch") as pbar:
                 for idx, batch in enumerate(self.train_dataloader):
                     try:
                         self.optimizer.zero_grad()
@@ -194,13 +201,13 @@ class WaveLLDMTrainer:
                         continue
 
             avg_train_loss = train_loss / train_steps if train_steps > 0 else 0
-            print(f"[GPU-{self.global_rank}] Epoch {epoch+1}/{self.epochs}, Average Train Loss: {avg_train_loss:.4f}")
+            print(f"Epoch {epoch+1}/{self.epochs}, Average Train Loss: {avg_train_loss:.4f}")
 
             if self.val_dataloader is not None:
                 val_loss = self.validate(epoch, self.val_dataloader, self.writer)
-                print(f"[GPU-{self.global_rank}] Epoch {epoch+1}/{self.epochs}, Average Val Loss: {val_loss:.4f}")
+                print(f"Epoch {epoch+1}/{self.epochs}, Average Val Loss: {val_loss:.4f}")
 
-            if self.local_rank == 0 and (epoch + 1) % self.save_every == 0:
+            if (epoch + 1) % self.save_every == 0:
                 checkpoint_path = os.path.join(self.save_dir, f"checkpoint_epoch_{epoch+1}.pth")
                 self.save_snapshot(epoch + 1)
                 print(f"Saved checkpoint to {checkpoint_path}")
@@ -214,33 +221,59 @@ class WaveLLDMTrainer:
         if prefix == "val":
             assert batch is not None, "Batch must be provided for validation logging"
             with torch.no_grad():
-                clean_latents = batch["clean_audio_downsampled_latents"]
-                degraded_latents = batch["noisy_audio_downsampled_latents"]
+                # clean_latents = batch["clean_audio_downsampled_latents"]
+                # degraded_latents = batch["noisy_audio_downsampled_latents"]
+
+                # Dapatkan audio
+                clean_audios = batch["clean_audios"] # Shape: B, 1, L
+                noisy_audios = batch["noisy_audios"] # Shape: B, 1, L
+    
+                clean_spec = self.model.spec_trans(clean_audios) # Shape: B, n_mel, l
+                noisy_spec = self.model.spec_trans(noisy_audios) # Shape: B, n_mel, l
+
+                clean_latents = self.model.encode(clean_spec) # Shape: B, base_dim, l_latent
+                noisy_latents = self.model.encode(noisy_spec) # Shape: B, base_dim, l_latent
 
                 noise = default(noise, lambda: torch.randn_like(clean_latents))
-                t = torch.randint(0, num_timesteps, (clean_latents.shape[0],), device=self.local_rank).long()
-                z_t = self.model.module.q_sample(x_start=clean_latents, t=t, noise=noise)
-                pred = self.model.module.p_estimator(z_t, t, degraded_latents)
+                t = torch.randint(0, num_timesteps, (clean_latents.shape[0],), device=self.device).long()
+                z_t = self.model.q_sample(x_start=clean_latents, t=t, noise=noise)
+                pred = self.model.p_estimator(z_t, t, noisy_latents)
                 writer.add_histogram(f"{prefix}/pred_histogram", pred.flatten(), global_step)
                 writer.add_histogram(f"{prefix}/gt_histogram", clean_latents.flatten(), global_step)
     
     def log_reconstruction(self, writer, batch, epoch): ####### BELUM SELESAI ########
         with torch.no_grad():
             # 1. Ambil latents dari batch. Pada saat ini, batch sedang memiliki padding. Jadi kita perlu menghilangkan padding tersebut.
-            degraded_audio_latents = batch["noisy_audio_downsampled_latents"][0].unsqueeze(0)
-            clean_audio_latents = batch["clean_audio_downsampled_latents"][0].unsqueeze(0)
-            # print(f"1 -> {degraded_audio_latents.shape}, {clean_audio_latents.shape}") # uncomment untuk debug
+            # degraded_audio_latents = batch["noisy_audio_downsampled_latents"][0].unsqueeze(0)
+            # clean_audio_latents = batch["clean_audio_downsampled_latents"][0].unsqueeze(0)
+            # # print(f"1 -> {degraded_audio_latents.shape}, {clean_audio_latents.shape}") # uncomment untuk debug
+
+            # Dapatkan audio
+            clean_audios = batch["clean_audios"] # Shape: B, 1, L
+            noisy_audios = batch["noisy_audios"] # Shape: B, 1, L
+
+            clean_spec = self.model.spec_trans(clean_audios) # Shape: B, n_mel, l
+            noisy_spec = self.model.spec_trans(noisy_audios) # Shape: B, n_mel, l
+    
+            clean_latents = self.model.encode(clean_spec) # Shape: B, base_dim, l_latent
+            noisy_latents = self.model.encode(noisy_spec) # Shape: B, base_dim, l_latent
+
+            sample_index = torch.randint(0, clean_latents.shape[0], ()).item()
+            
+            clean_audio_latents = clean_latents[sample_index].unsqueeze(0)
+            degraded_audio_latents = noisy_latents[sample_index].unsqueeze(0)
             
 
             # 2. Sampel latents dari p_sample_loop
-            recon_audio_latents = self.model.module.sample_with_ema(degraded_audio_latents, batch_size=1)
+            recon_audio_latents = self.model.sample_with_ema(degraded_audio_latents, batch_size=1)
             
             # Rescale latents if std_scale_factor is provided (1/std_scale_factor * latents)
-            if self.model.module.std_scale_factor:
-                recon_audio_latents = recon_audio_latents * self.model.module.std_scale_factor
+            if self.model.std_scale_factor:
+                recon_audio_latents = recon_audio_latents * self.model.std_scale_factor
 
             # 3. Dapatkan informasi mengenai panjang laten asli dari batch
-            first_length = batch["lengths"][0]
+            # first_length = batch["lengths"][0]
+            first_length = clean_latents.shape[-1]
             # print(f"3 -> {first_length}") # uncomment untuk debug
 
             # 4. Ambil latents yang telah disampel dan dari batch dan hilangkan padding, sehingga kita mendapatkan panjang
@@ -250,15 +283,15 @@ class WaveLLDMTrainer:
             clean_audio_latents = clean_audio_latents[:, :, :first_length]
             # print(f"4 -> {degraded_audio_latents.shape}, {recon_audio_latents.shape}, {clean_audio_latents.shape}") # uncomment untuk debug
 
-            recon_audio_latents, _ = self.model.module.quantizer.residual_fsq(recon_audio_latents.mT)
-            clean_audio_latents, _ = self.model.module.quantizer.residual_fsq(clean_audio_latents.mT)
+            recon_audio_latents, _ = self.model.quantizer.residual_fsq(recon_audio_latents.mT)
+            clean_audio_latents, _ = self.model.quantizer.residual_fsq(clean_audio_latents.mT)
 
-            recon_audio_upsampled_latents = self.model.module.quantizer.upsample(recon_audio_latents.mT)
-            clean_audio_upsampled_latents = self.model.module.quantizer.upsample(clean_audio_latents.mT)
+            recon_audio_upsampled_latents = self.model.quantizer.upsample(recon_audio_latents.mT)
+            clean_audio_upsampled_latents = self.model.quantizer.upsample(clean_audio_latents.mT)
 
             # print(f"4 -> {recon_audio_upsampled_latents.shape}, {clean_audio_upsampled_latents.shape}") # uncomment untuk debug
 
-            diff = batch["melspec_lengths"][0] - recon_audio_upsampled_latents.shape[-1] # Masih salah, wip
+            diff = clean_spec.shape[-1] - recon_audio_upsampled_latents.shape[-1] # Masih salah, wip
             left = max(diff // 2, 0)  # Pastikan left tidak negatif
             right = max(diff - left, 0)
             
@@ -273,21 +306,21 @@ class WaveLLDMTrainer:
 
             # print(f"5 -> {recon_audio_upsampled_latents.shape}, {clean_audio_upsampled_latents.shape}") # uncomment untuk debug
 
-            recon_audio = self.model.module.decode(recon_audio_upsampled_latents)
-            clean_audio = self.model.module.decode(clean_audio_upsampled_latents)
+            recon_audio = self.model.decode(recon_audio_upsampled_latents)
+            clean_audio = self.model.decode(clean_audio_upsampled_latents)
 
             # print(f"6 -> {recon_audio.shape}, {clean_audio.shape}") # uncomment untuk debug
 
-            writer.add_audio(f"Reconstructed Audio", recon_audio[0].cpu(), epoch, sample_rate=44100)
-            writer.add_audio(f"Clean Audio", clean_audio[0].cpu(), epoch, sample_rate=44100)
+            writer.add_audio(f"Reconstructed Audio", recon_audio[0].cpu(), epoch, sample_rate=48000)
+            writer.add_audio(f"Clean Audio", clean_audio[0].cpu(), epoch, sample_rate=48000)
     
     def save_snapshot(self, epoch):
         """Simpan weight model"""
         checkpoint = {
             "epoch": epoch,
-            "model_state_dict": self.model.module.state_dict(),
+            "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
-            "ema_state_dict": self.model.module.ema.shadow if self.model.module.use_ema else None
+            "ema_state_dict": self.model.ema.shadow if self.model.use_ema else None
         }
         checkpoint_path = os.path.join(self.save_dir, f"wave_lldm_epoch_{epoch}.pth")
         torch.save(checkpoint, checkpoint_path)
