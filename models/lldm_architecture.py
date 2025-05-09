@@ -107,7 +107,7 @@ class DDPM(nn.Module):
         loss_type: str = "l2", # loss function yang digunakan, l2 = MSE, l1 = MAE
         log_every: int = 100, # frekuensi logging
         use_ema: bool = True, # menggunakan exponential moving average untuk mengatur parameter model selama training
-        clip_denoised=True, # apakah akan meng-clamp hasil denoising ke rentang [-1, 1]
+        clip_denoised=False, # apakah akan meng-clamp hasil denoising ke rentang [-1, 1]
         ema_decay: float = 0.9999, # decay rate untuk EMA
         linear_start: float = 1e-4, # nilai beta awal untuk scheduler linear
         linear_end: float = 2e-2, # nilai beta akhir untuk scheduler linear
@@ -447,7 +447,7 @@ class WaveLLDM(DDPM):
             encoder: nn.Module, # model encoder untuk mengubah data ke latent space
             decoder: nn.Module, # model decoder untuk mengubah data dari latent space ke data asli
             quantizer, # model quantizer untuk mengubah data ke representasi diskrit
-            std_scale_factor: float = 1.0, # apakah akan melakukan rescaling pada latent space. Default 0.5061
+            scaling_factor: float = 1.0, # apakah akan melakukan rescaling pada latent space. Default 0.5061
             z_dim: int = 512, # dimensi latent space
             ema_decay: float = 0.9999, # decay rate untuk EMA
             use_latent: bool = True, # apakah akan menggunakan latent space untuk training
@@ -459,7 +459,7 @@ class WaveLLDM(DDPM):
         self.beta_scheduler = kwargs.get('beta_scheduler', 'cosine') # beta scheduler untuk mengatur intensitas noise
         self.original_elbo_weight = kwargs.get('original_elbo_weight', 1.0) # bobot untuk original elbo loss
 
-        self.std_scale_factor = std_scale_factor
+        self.scaling_factor = scaling_factor
         self.z_dim = z_dim
         self.use_latent = use_latent
 
@@ -595,9 +595,12 @@ class WaveLLDM(DDPM):
         clean_latents = self.encode(clean_spec) # Shape: B, base_dim, l
         noisy_latents = self.encode(noisy_spec) # Shape: B, base_dimdim, l
 
-        if self.std_scale_factor: # Rescale latents if std_scale_factor is provided (1/std_scale_factor * latents)
-            clean_latents = clean_latents * (1./self.std_scale_factor)
-            noisy_latents = noisy_latents * (1./self.std_scale_factor)
+        if self.scaling_factor: # Rescale latents if scaling_factor is provided (1/scaling_factor * latents)
+            # clean_latents = (clean_latents + self.scaling_factor) / 2 * self.scaling_factor
+            # noisy_latents = (noisy_latents + self.scaling_factor) / 2 * self.scaling_factor
+
+            clean_latents = clean_latents * 1 / self.scaling_factor
+            noisy_latents = noisy_latents * 1 / self.scaling_factor
         
         
         # Sample timestep t
