@@ -113,7 +113,7 @@ class GlobalResponseNorm(nn.Module):
     Returns:
         Normalized tensor of the same shape as input.
     """
-    def __init__(self, dim, device=int(os.environ["LOCAL_RANK"])):
+    def __init__(self, dim, device="cuda" if torch.cuda.is_available() else "cpu"):
         super().__init__()
         self.gamma = nn.Parameter(torch.zeros(1, 1, 1, dim)).to(device)
         self.beta = nn.Parameter(torch.zeros(1, 1, 1, dim)).to(device)
@@ -123,7 +123,7 @@ class GlobalResponseNorm(nn.Module):
         Nx = Gx / (Gx.mean(dim=-1, keepdim=True) + eps)
         return self.gamma * (x * Nx) + self.beta + x
 
-# class ConvNeXtV2Block(nn.Module):
+# class ConvNeXtV2Block(nn.Module): ############ WITHOUT TEMPORAL FILM ##############
 #     """ ConvNeXtV2 Block.
     
 #     Args:
@@ -269,11 +269,9 @@ class ConvNeXtV2Block(nn.Module):
         x = x.permute(0, 3, 1, 2)  # back to (N,C,H,W)
         if self.use_film:
             film_cat = torch.cat(film_input, dim=1)  # (N,emb_ch,H,W)
-            # print("SAMPE SINI OKE", film_cat.shape)
             scale_shift = self.film_conv(film_cat)   # (N,2*dim,H,W)
             scale, shift = scale_shift.chunk(2, dim=1)
             x = x * (1 + scale) + shift
-            # print("use film selesai")
 
         # MLP
         x = x.permute(0, 2, 3, 1)  # (N,H,W,C)
@@ -282,8 +280,7 @@ class ConvNeXtV2Block(nn.Module):
         x = self.grn(x)
         x = self.pwconv2(x)
         x = x.permute(0, 3, 1, 2)
-        # print("Boboho", x.shape)
-        # print("Boboho2", residual.shape)
+
         return residual + self.drop_path(x)
 
 
@@ -501,7 +498,7 @@ class Downsample(nn.Module):
                                         out_channels,
                                         kernel_size=3,
                                         stride=2,
-                                        padding=0).to(int(os.environ["LOCAL_RANK"]))
+                                        padding=0).to("cuda" if torch.cuda.is_available() else "cpu")
 
     def forward(self, x):
         if self.with_conv:
@@ -550,7 +547,7 @@ class Upsample(nn.Module):
                                         out_channels,
                                         kernel_size=3,
                                         stride=1,
-                                        padding=1).to(int(os.environ["LOCAL_RANK"]))
+                                        padding=1).to("cuda" if torch.cuda.is_available() else "cpu")
 
     def forward(self, x):
         x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
@@ -575,7 +572,6 @@ class UpBlock(nn.Module):
         
         if use_attn:
             self.attn = RotaryLinearAttention(in_channels, n_heads=16, n_kv_heads=16)
-            # self.attn = nn.Identity()
         else:
             self.attn = None
 
@@ -653,50 +649,38 @@ class RotaryUNet(nn.Module):
 
         # Time embedding
         t = self.time_mlp(time)
-        # print(t.shape)
 
         # Initial projection
         if cond is not None:
             if len(cond.shape) == 3:
                 cond = cond.unsqueeze(1)
 
-        # if not self.use_film:    
-        #     assert cond.shape[1] == x.shape[1], "Condition tensor must have the same number of channels (C) as input tensor."
-        #     x = torch.cat([x, cond], dim=1)
-
         x = torch.cat([x, cond], dim=1)
 
         x = self.init_conv(x)
-        # print(f"Initial Conv: {x.shape}")
         
         # Store skip connections
         skips = [x]
         
         # Down path
-        # print(f"Down path:")
         for i, block in enumerate(self.down_blocks):
             x = block(x, t, cond)
-            # print(f"Layer {i+1}: {x.shape}")
             skips.append(x)
             
         
-        # Middle block (R-A-R)
+        # Middle block
         x = self.mid_block1(x, t, cond)
         x = self.mid_block2(x, t, cond)
         x = self.mid_attn(x)
-        # print(f"Middle block: {x.shape}")
 
         # Up path with skip connections
-        # print(f"Up path:")
         for i, block in enumerate(self.up_blocks):
             skip_x = skips.pop()
             x = block(x, skip_x, t, cond)
-            # print(f"Layer {i+1}: {x.shape}") 
 
         # Final processing
         x = torch.cat([x, skips.pop()], dim=1)
         x = self.final_conv(x)
-        # print(f"Final Conv: {x.shape}")
         
         return x.squeeze(1) if len(x.shape) == 4 else x
 
